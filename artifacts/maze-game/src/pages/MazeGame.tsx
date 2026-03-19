@@ -143,6 +143,9 @@ const MAZE_SIZES = [
   { label: "Easy (10×10)", rows: 10, cols: 10 },
   { label: "Medium (15×15)", rows: 15, cols: 15 },
   { label: "Hard (20×20)", rows: 20, cols: 20 },
+  { label: "Harder (30×30)", rows: 30, cols: 30 },
+  { label: "Hardest (40×40)", rows: 40, cols: 40 },
+  { label: "GOD (50×50)", rows: 50, cols: 50 },
 ];
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -382,15 +385,19 @@ export default function MazeGame() {
 
       {/* Size selector */}
       {state.status === "idle" && (
-        <div className="flex gap-2 mb-6">
+        <div className="flex flex-wrap gap-2 justify-center mb-6 max-w-lg">
           {MAZE_SIZES.map((s, i) => (
             <button
               key={i}
               onClick={() => setSizeIndex(i)}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ${
-                sizeIndex === i
-                  ? "bg-indigo-500 border-indigo-400 text-white"
-                  : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
+                i === 5
+                  ? sizeIndex === i
+                    ? "bg-yellow-500 border-yellow-400 text-black font-bold"
+                    : "bg-yellow-900/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-900/40"
+                  : sizeIndex === i
+                    ? "bg-indigo-500 border-indigo-400 text-white"
+                    : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
               }`}
             >
               {s.label}
@@ -418,15 +425,19 @@ export default function MazeGame() {
               <p className="text-2xl font-bold text-indigo-300 mb-1">Ready to play?</p>
               <p className="text-sm text-gray-400">Choose a difficulty and start!</p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2 justify-center px-4 max-w-xs">
               {MAZE_SIZES.map((s, i) => (
                 <button
                   key={i}
                   onClick={() => setSizeIndex(i)}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ${
-                    sizeIndex === i
-                      ? "bg-indigo-500 border-indigo-400 text-white"
-                      : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
+                    i === 5
+                      ? sizeIndex === i
+                        ? "bg-yellow-500 border-yellow-400 text-black font-bold"
+                        : "bg-yellow-900/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-900/40"
+                      : sizeIndex === i
+                        ? "bg-indigo-500 border-indigo-400 text-white"
+                        : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
                   }`}
                 >
                   {s.label}
@@ -500,7 +511,7 @@ export default function MazeGame() {
             </div>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-2 justify-center max-w-lg">
             <button
               onClick={() => startGame(sizeIndex)}
               className="px-5 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm text-gray-200 font-medium transition-all"
@@ -512,9 +523,13 @@ export default function MazeGame() {
                 key={i}
                 onClick={() => { setSizeIndex(i); startGame(i); }}
                 className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all hidden sm:block ${
-                  sizeIndex === i
-                    ? "bg-indigo-500/40 border-indigo-400 text-indigo-200"
-                    : "bg-white/5 border-white/10 text-gray-400 hover:bg-white/10"
+                  i === 5
+                    ? sizeIndex === i
+                      ? "bg-yellow-500/40 border-yellow-400 text-yellow-200"
+                      : "bg-yellow-900/20 border-yellow-700/40 text-yellow-500 hover:bg-yellow-900/40"
+                    : sizeIndex === i
+                      ? "bg-indigo-500/40 border-indigo-400 text-indigo-200"
+                      : "bg-white/5 border-white/10 text-gray-400 hover:bg-white/10"
                 }`}
               >
                 {s.label}
