@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -9,16 +10,23 @@ import {
   Dimensions,
   PanResponder,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from "react-native";
+import Animated, {
+  useSharedValue,
+  withSpring,
+  useAnimatedProps,
+} from "react-native-reanimated";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Rect, Text as SvgText } from "react-native-svg";
+
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +80,6 @@ function generateMaze(rows: number, cols: number): Cell[][] {
     { dr: 1, dc: 0, wall: "bottom" as const, opposite: "top" as const },
     { dr: 0, dc: -1, wall: "left" as const, opposite: "right" as const },
   ];
-
   function shuffle<T>(arr: T[]): T[] {
     const a = [...arr];
     for (let i = a.length - 1; i > 0; i--) {
@@ -81,11 +88,9 @@ function generateMaze(rows: number, cols: number): Cell[][] {
     }
     return a;
   }
-
   const stack: [number, number][] = [];
   grid[0][0].visited = true;
   stack.push([0, 0]);
-
   while (stack.length > 0) {
     const [r, c] = stack[stack.length - 1];
     const neighbors = shuffle(directions).filter(({ dr, dc }) => {
@@ -93,7 +98,6 @@ function generateMaze(rows: number, cols: number): Cell[][] {
       const nc = c + dc;
       return nr >= 0 && nr < rows && nc >= 0 && nc < cols && !grid[nr][nc].visited;
     });
-
     if (neighbors.length === 0) {
       stack.pop();
     } else {
@@ -125,28 +129,23 @@ function findPath(
   ];
   const visited = new Set<string>();
   visited.add(`${startRow},${startCol}`);
-
   while (queue.length > 0) {
     const [r, c, path] = queue.shift()!;
-    if (r === endRow && c === endCol) {
+    if (r === endRow && c === endCol)
       return new Set(path.map(([pr, pc]) => `${pr},${pc}`));
-    }
     const cell = maze[r][c];
-    const moves = [
+    for (const { dr, dc, wall } of [
       { dr: -1, dc: 0, wall: "top" as const },
       { dr: 1, dc: 0, wall: "bottom" as const },
       { dr: 0, dc: 1, wall: "right" as const },
       { dr: 0, dc: -1, wall: "left" as const },
-    ];
-    for (const { dr, dc, wall } of moves) {
+    ]) {
       const nr = r + dr;
       const nc = c + dc;
       const key = `${nr},${nc}`;
       if (
-        nr >= 0 && nr < rows &&
-        nc >= 0 && nc < cols &&
-        !cell.walls[wall] &&
-        !visited.has(key)
+        nr >= 0 && nr < rows && nc >= 0 && nc < cols &&
+        !cell.walls[wall] && !visited.has(key)
       ) {
         visited.add(key);
         queue.push([nr, nc, [...path, [nr, nc]]]);
@@ -172,46 +171,34 @@ function reducer(state: GameState, action: Action): GameState {
         timeSeconds: 0,
         status: "playing",
       };
-
     case "MOVE": {
       if (state.status !== "playing") return state;
       const { dr, dc } = action;
       const { playerRow: r, playerCol: c, maze } = state;
       const cell = maze[r][c];
-      let wallBlocked = false;
-      if (dr === -1 && cell.walls.top) wallBlocked = true;
-      if (dr === 1 && cell.walls.bottom) wallBlocked = true;
-      if (dc === 1 && cell.walls.right) wallBlocked = true;
-      if (dc === -1 && cell.walls.left) wallBlocked = true;
-      if (wallBlocked) return state;
+      if (
+        (dr === -1 && cell.walls.top) ||
+        (dr === 1 && cell.walls.bottom) ||
+        (dc === 1 && cell.walls.right) ||
+        (dc === -1 && cell.walls.left)
+      )
+        return state;
       const nr = r + dr;
       const nc = c + dc;
       if (nr < 0 || nr >= state.rows || nc < 0 || nc >= state.cols) return state;
-      const won = nr === state.rows - 1 && nc === state.cols - 1;
       return {
         ...state,
         playerRow: nr,
         playerCol: nc,
         moves: state.moves + 1,
-        status: won ? "won" : "playing",
+        status: nr === state.rows - 1 && nc === state.cols - 1 ? "won" : "playing",
       };
     }
-
     case "TICK":
       if (state.status !== "playing") return state;
       return { ...state, timeSeconds: state.timeSeconds + 1 };
-
     case "RESET":
-      return {
-        ...state,
-        maze: [],
-        playerRow: 0,
-        playerCol: 0,
-        moves: 0,
-        timeSeconds: 0,
-        status: "idle",
-      };
-
+      return { ...state, maze: [], playerRow: 0, playerCol: 0, moves: 0, timeSeconds: 0, status: "idle" };
     default:
       return state;
   }
@@ -273,9 +260,71 @@ function haptic(type: "light" | "medium" | "success" | "error") {
   } catch {}
 }
 
-// ─── Maze SVG Renderer ───────────────────────────────────────────────────────
+// ─── Static Maze Grid (memoized) ─────────────────────────────────────────────
 
-interface MazeSvgProps {
+interface StaticGridProps {
+  maze: Cell[][];
+  rows: number;
+  cols: number;
+  cellSize: number;
+  offX: number;
+  offY: number;
+  size: number;
+}
+
+const StaticGrid = React.memo(function StaticGrid({
+  maze, rows, cols, cellSize, offX, offY, size,
+}: StaticGridProps) {
+  const cellRects: React.ReactNode[] = [];
+  const wallLines: React.ReactNode[] = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = offX + c * cellSize;
+      const y = offY + r * cellSize;
+      const isStart = r === 0 && c === 0;
+      const isGoal = r === rows - 1 && c === cols - 1;
+
+      cellRects.push(
+        <Rect
+          key={`c-${r}-${c}`}
+          x={x + 1} y={y + 1}
+          width={cellSize - 1} height={cellSize - 1}
+          fill={isStart ? "rgba(34,211,153,0.22)" : isGoal ? "rgba(251,191,36,0.22)" : "#1e2030"}
+        />
+      );
+
+      const { walls } = maze[r][c];
+      if (walls.top) wallLines.push(<Line key={`wt-${r}-${c}`} x1={x} y1={y} x2={x + cellSize} y2={y} stroke="#4a5070" strokeWidth={1.5} />);
+      if (walls.right) wallLines.push(<Line key={`wr-${r}-${c}`} x1={x + cellSize} y1={y} x2={x + cellSize} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
+      if (walls.bottom) wallLines.push(<Line key={`wb-${r}-${c}`} x1={x} y1={y + cellSize} x2={x + cellSize} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
+      if (walls.left) wallLines.push(<Line key={`wl-${r}-${c}`} x1={x} y1={y} x2={x} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
+    }
+  }
+
+  const fontSize = Math.max(6, cellSize - 6);
+
+  return (
+    <>
+      <Rect x={0} y={0} width={size} height={size} fill="#0f1117" />
+      {cellRects}
+      {wallLines}
+      <SvgText
+        x={offX + cellSize / 2} y={offY + cellSize / 2 + fontSize * 0.36}
+        fontSize={fontSize} fontWeight="bold" fill="#34d399" textAnchor="middle"
+      >S</SvgText>
+      <SvgText
+        x={offX + (cols - 1) * cellSize + cellSize / 2}
+        y={offY + (rows - 1) * cellSize + cellSize / 2 + fontSize * 0.36}
+        fontSize={fontSize} fontWeight="bold" fill="#fbbf24" textAnchor="middle"
+      >G</SvgText>
+    </>
+  );
+});
+
+// ─── Maze Canvas ─────────────────────────────────────────────────────────────
+
+interface MazeCanvasProps {
   maze: Cell[][];
   rows: number;
   cols: number;
@@ -285,110 +334,159 @@ interface MazeSvgProps {
   size: number;
 }
 
-function MazeSvg({ maze, rows, cols, playerRow, playerCol, hintPath, size }: MazeSvgProps) {
+function MazeCanvas({ maze, rows, cols, playerRow, playerCol, hintPath, size }: MazeCanvasProps) {
   const cellSize = Math.floor(size / Math.max(rows, cols));
   const totalW = cellSize * cols;
   const totalH = cellSize * rows;
   const offX = Math.floor((size - totalW) / 2);
   const offY = Math.floor((size - totalH) / 2);
 
-  const wallLines: React.ReactNode[] = [];
-  const hintDots: React.ReactNode[] = [];
-  const cellRects: React.ReactNode[] = [];
+  const radius = Math.max(3, Math.floor(cellSize * 0.3));
 
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const x = offX + c * cellSize;
-      const y = offY + r * cellSize;
-      const key = `${r},${c}`;
-      const onPath = hintPath.has(key);
+  const targetCx = offX + playerCol * cellSize + cellSize / 2;
+  const targetCy = offY + playerRow * cellSize + cellSize / 2;
+
+  const cx = useSharedValue(targetCx);
+  const cy = useSharedValue(targetCy);
+
+  useEffect(() => {
+    cx.value = withSpring(targetCx, { damping: 18, stiffness: 320, mass: 0.6 });
+    cy.value = withSpring(targetCy, { damping: 18, stiffness: 320, mass: 0.6 });
+  }, [targetCx, targetCy]);
+
+  const animatedPlayerProps = useAnimatedProps(() => ({
+    cx: cx.value,
+    cy: cy.value,
+  }));
+
+  const animatedGlowProps = useAnimatedProps(() => ({
+    cx: cx.value - radius * 0.2,
+    cy: cy.value - radius * 0.25,
+  }));
+
+  const hintDots = useMemo(() => {
+    const dots: React.ReactNode[] = [];
+    hintPath.forEach((key) => {
+      const [r, c] = key.split(",").map(Number);
+      const isPlayer = r === playerRow && c === playerCol;
       const isStart = r === 0 && c === 0;
       const isGoal = r === rows - 1 && c === cols - 1;
-      const isPlayer = r === playerRow && c === playerCol;
-
-      if (isStart) {
-        cellRects.push(
-          <Rect key={`s-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(34,211,153,0.25)" />
-        );
-      } else if (isGoal) {
-        cellRects.push(
-          <Rect key={`g-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(251,191,36,0.25)" />
-        );
-      } else if (onPath) {
-        cellRects.push(
-          <Rect key={`h-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(6,182,212,0.18)" />
-        );
-        if (!isPlayer) {
-          const dotR = Math.max(1.5, cellSize * 0.14);
-          hintDots.push(
-            <Circle key={`d-${r}-${c}`} cx={x + cellSize / 2} cy={y + cellSize / 2} r={dotR} fill="rgba(34,211,238,0.65)" />
-          );
-        }
-      } else {
-        cellRects.push(
-          <Rect key={`c-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="#1e2030" />
+      if (!isPlayer && !isStart && !isGoal) {
+        const x = offX + c * cellSize;
+        const y = offY + r * cellSize;
+        const dotR = Math.max(1.5, cellSize * 0.13);
+        dots.push(
+          <Circle
+            key={key}
+            cx={x + cellSize / 2} cy={y + cellSize / 2}
+            r={dotR} fill="rgba(34,211,238,0.65)"
+          />
         );
       }
+    });
+    return dots;
+  }, [hintPath, playerRow, playerCol, offX, offY, cellSize, rows, cols]);
 
-      const { walls } = maze[r][c];
-      if (walls.top) wallLines.push(<Line key={`wt-${r}-${c}`} x1={x} y1={y} x2={x + cellSize} y2={y} stroke="#5b6082" strokeWidth={1.5} />);
-      if (walls.right) wallLines.push(<Line key={`wr-${r}-${c}`} x1={x + cellSize} y1={y} x2={x + cellSize} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
-      if (walls.bottom) wallLines.push(<Line key={`wb-${r}-${c}`} x1={x} y1={y + cellSize} x2={x + cellSize} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
-      if (walls.left) wallLines.push(<Line key={`wl-${r}-${c}`} x1={x} y1={y} x2={x} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
-    }
-  }
-
-  const px = offX + playerCol * cellSize;
-  const py = offY + playerRow * cellSize;
-  const radius = Math.max(3, Math.floor(cellSize * 0.3));
-  const fontSize = Math.max(6, cellSize - 6);
+  const hintCellHighlights = useMemo(() => {
+    const highlights: React.ReactNode[] = [];
+    hintPath.forEach((key) => {
+      const [r, c] = key.split(",").map(Number);
+      const isStart = r === 0 && c === 0;
+      const isGoal = r === rows - 1 && c === cols - 1;
+      if (!isStart && !isGoal) {
+        const x = offX + c * cellSize;
+        const y = offY + r * cellSize;
+        highlights.push(
+          <Rect
+            key={`hl-${key}`}
+            x={x + 1} y={y + 1}
+            width={cellSize - 1} height={cellSize - 1}
+            fill="rgba(6,182,212,0.15)"
+          />
+        );
+      }
+    });
+    return highlights;
+  }, [hintPath, offX, offY, cellSize, rows, cols]);
 
   return (
     <Svg width={size} height={size}>
-      <Rect x={0} y={0} width={size} height={size} fill="#0f1117" />
-      {cellRects}
-      {wallLines}
+      <StaticGrid
+        maze={maze} rows={rows} cols={cols}
+        cellSize={cellSize} offX={offX} offY={offY} size={size}
+      />
+      {hintCellHighlights}
       {hintDots}
-      <SvgText x={offX + cellSize / 2} y={offY + cellSize / 2 + fontSize * 0.36} fontSize={fontSize} fontWeight="bold" fill="#34d399" textAnchor="middle">S</SvgText>
-      <SvgText x={offX + (cols - 1) * cellSize + cellSize / 2} y={offY + (rows - 1) * cellSize + cellSize / 2 + fontSize * 0.36} fontSize={fontSize} fontWeight="bold" fill="#fbbf24" textAnchor="middle">G</SvgText>
-      <Circle cx={px + cellSize / 2} cy={py + cellSize / 2} r={radius} fill="#818cf8" opacity={0.95} />
-      <Circle cx={px + cellSize / 2 - radius * 0.2} cy={py + cellSize / 2 - radius * 0.25} r={radius * 0.4} fill="rgba(255,255,255,0.5)" />
+      <AnimatedCircle animatedProps={animatedPlayerProps} r={radius} fill="#818cf8" opacity={0.95} />
+      <AnimatedCircle animatedProps={animatedGlowProps} r={radius * 0.4} fill="rgba(255,255,255,0.5)" />
     </Svg>
   );
 }
 
-// ─── D-Pad ────────────────────────────────────────────────────────────────────
+// ─── D-Pad with Hold-to-Repeat ────────────────────────────────────────────────
 
-function DPad({ onMove }: { onMove: (dr: number, dc: number) => void }) {
-  const BTN = 64;
-  const GAP = 6;
+const INITIAL_DELAY = 300;
+const REPEAT_INTERVAL = 100;
 
-  const btn = (dr: number, dc: number, label: string) => (
-    <TouchableOpacity
-      style={[styles.dpadBtn, { width: BTN, height: BTN }]}
-      activeOpacity={0.55}
-      onPress={() => onMove(dr, dc)}
-    >
-      <Text style={styles.dpadArrow}>{label}</Text>
-    </TouchableOpacity>
-  );
+interface DPadProps {
+  onMove: (dr: number, dc: number) => void;
+  disabled?: boolean;
+}
+
+function DPadButton({
+  dr, dc, label, onMove,
+}: { dr: number; dc: number; label: string; onMove: (dr: number, dc: number) => void }) {
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [pressed, setPressed] = useState(false);
+
+  const stopRepeat = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    setPressed(false);
+  }, []);
+
+  const startRepeat = useCallback(() => {
+    setPressed(true);
+    onMove(dr, dc);
+    timeoutRef.current = setTimeout(() => {
+      intervalRef.current = setInterval(() => {
+        onMove(dr, dc);
+      }, REPEAT_INTERVAL);
+    }, INITIAL_DELAY);
+  }, [dr, dc, onMove]);
+
+  useEffect(() => () => stopRepeat(), []);
 
   return (
-    <View style={[styles.dpadContainer, { gap: GAP }]}>
-      <View style={[styles.dpadRow, { gap: GAP }]}>
-        <View style={{ width: BTN }} />
-        {btn(-1, 0, "▲")}
-        <View style={{ width: BTN }} />
+    <Pressable
+      style={[styles.dpadBtn, pressed && styles.dpadBtnPressed]}
+      onPressIn={startRepeat}
+      onPressOut={stopRepeat}
+      delayLongPress={9999}
+    >
+      <Text style={[styles.dpadArrow, pressed && styles.dpadArrowPressed]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function DPad({ onMove }: DPadProps) {
+  return (
+    <View style={styles.dpadContainer}>
+      <View style={styles.dpadRow}>
+        <View style={styles.dpadSpacer} />
+        <DPadButton dr={-1} dc={0} label="▲" onMove={onMove} />
+        <View style={styles.dpadSpacer} />
       </View>
-      <View style={[styles.dpadRow, { gap: GAP }]}>
-        {btn(0, -1, "◀")}
-        <View style={[styles.dpadCenter, { width: BTN, height: BTN }]} />
-        {btn(0, 1, "▶")}
+      <View style={styles.dpadRow}>
+        <DPadButton dr={0} dc={-1} label="◀" onMove={onMove} />
+        <View style={styles.dpadCenter} />
+        <DPadButton dr={0} dc={1} label="▶" onMove={onMove} />
       </View>
-      <View style={[styles.dpadRow, { gap: GAP }]}>
-        <View style={{ width: BTN }} />
-        {btn(1, 0, "▼")}
-        <View style={{ width: BTN }} />
+      <View style={styles.dpadRow}>
+        <View style={styles.dpadSpacer} />
+        <DPadButton dr={1} dc={0} label="▼" onMove={onMove} />
+        <View style={styles.dpadSpacer} />
       </View>
     </View>
   );
@@ -417,9 +515,11 @@ export default function MazeScreen() {
     rows: 15,
   });
 
-  useEffect(() => {
-    loadBestScores().then(setBestScores);
-  }, []);
+  // Keep a ref to current state for the swipe + move handlers
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  useEffect(() => { loadBestScores().then(setBestScores); }, []);
 
   const startGame = useCallback((idx: number) => {
     const { rows, cols } = MAZE_SIZES[idx];
@@ -430,25 +530,20 @@ export default function MazeScreen() {
     haptic("medium");
   }, []);
 
-  const move = useCallback(
-    (dr: number, dc: number) => {
-      if (state.status !== "playing") return;
-      const { playerRow: r, playerCol: c, maze } = state;
-      const cell = maze[r][c];
-      let blocked = false;
-      if (dr === -1 && cell.walls.top) blocked = true;
-      if (dr === 1 && cell.walls.bottom) blocked = true;
-      if (dc === 1 && cell.walls.right) blocked = true;
-      if (dc === -1 && cell.walls.left) blocked = true;
-      if (blocked) {
-        haptic("error");
-      } else {
-        haptic("light");
-      }
-      dispatch({ type: "MOVE", dr, dc });
-    },
-    [state]
-  );
+  const move = useCallback((dr: number, dc: number) => {
+    const s = stateRef.current;
+    if (s.status !== "playing") return;
+    const { playerRow: r, playerCol: c, maze } = s;
+    const cell = maze[r][c];
+    const blocked =
+      (dr === -1 && cell.walls.top) ||
+      (dr === 1 && cell.walls.bottom) ||
+      (dc === 1 && cell.walls.right) ||
+      (dc === -1 && cell.walls.left);
+    if (blocked) haptic("error");
+    else haptic("light");
+    dispatch({ type: "MOVE", dr, dc });
+  }, []);
 
   useEffect(() => {
     if (state.status === "playing") {
@@ -464,34 +559,20 @@ export default function MazeScreen() {
       haptic("success");
       const key = `${state.rows}x${state.cols}`;
       saveBestScore(key, state.timeSeconds, state.moves, bestScores).then(
-        ({ updated, isNew }) => {
-          setBestScores(updated);
-          setNewRecord(isNew);
-        }
+        ({ updated, isNew }) => { setBestScores(updated); setNewRecord(isNew); }
       );
     }
   }, [state.status]);
 
-  // ─ Swipe gesture handler ──────────────────────────────────────────────────
-
-  const swipeRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
-  const SWIPE_THRESHOLD = 20;
-
+  // Swipe gesture
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) =>
-        Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
-      onPanResponderGrant: () => {
-        swipeRef.current = { dx: 0, dy: 0 };
-      },
-      onPanResponderMove: (_, g) => {
-        swipeRef.current = { dx: g.dx, dy: g.dy };
-      },
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
       onPanResponderRelease: (_, g) => {
+        const THRESHOLD = 18;
         const { dx, dy } = g;
-        if (Math.abs(dx) < SWIPE_THRESHOLD && Math.abs(dy) < SWIPE_THRESHOLD)
-          return;
+        if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
         if (Math.abs(dx) > Math.abs(dy)) {
           if (dx > 0) dispatch({ type: "MOVE", dr: 0, dc: 1 });
           else dispatch({ type: "MOVE", dr: 0, dc: -1 });
@@ -504,10 +585,13 @@ export default function MazeScreen() {
     })
   ).current;
 
-  const hintPath =
-    showHint && state.maze.length > 0
-      ? findPath(state.maze, state.rows, state.cols, state.playerRow, state.playerCol)
-      : new Set<string>();
+  const hintPath = useMemo(
+    () =>
+      showHint && state.maze.length > 0
+        ? findPath(state.maze, state.rows, state.cols, state.playerRow, state.playerCol)
+        : new Set<string>(),
+    [showHint, state.maze, state.rows, state.cols, state.playerRow, state.playerCol]
+  );
 
   const currentKey = `${state.rows}x${state.cols}`;
   const best = bestScores[currentKey];
@@ -521,6 +605,7 @@ export default function MazeScreen() {
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        scrollEnabled={state.status !== "playing"}
       >
         <Text style={styles.title}>Maze Game</Text>
         <Text style={styles.subtitle}>
@@ -551,7 +636,7 @@ export default function MazeScreen() {
               const b = bestScores[bk];
               const isGod = i === 5;
               return (
-                <TouchableOpacity
+                <Pressable
                   key={i}
                   style={[
                     styles.sizeBtn,
@@ -559,23 +644,13 @@ export default function MazeScreen() {
                     isGod && styles.sizeBtnGod,
                   ]}
                   onPress={() => setSizeIndex(i)}
-                  activeOpacity={0.7}
                 >
-                  <Text style={[
-                    styles.sizeBtnText,
-                    sizeIndex === i && (isGod ? styles.sizeBtnGodText : styles.sizeBtnTextActive),
-                  ]}>
+                  <Text style={[styles.sizeBtnText, sizeIndex === i && (isGod ? styles.sizeBtnGodText : styles.sizeBtnTextActive)]}>
                     {s.label}
                   </Text>
-                  <Text style={[styles.sizeBtnSub, sizeIndex === i && styles.sizeBtnSubActive]}>
-                    {s.sub}
-                  </Text>
-                  {b && (
-                    <Text style={styles.sizeBtnBest}>
-                      {formatTime(b.time)} / {b.moves}m
-                    </Text>
-                  )}
-                </TouchableOpacity>
+                  <Text style={[styles.sizeBtnSub, sizeIndex === i && styles.sizeBtnSubActive]}>{s.sub}</Text>
+                  {b && <Text style={styles.sizeBtnBest}>{formatTime(b.time)} / {b.moves}m</Text>}
+                </Pressable>
               );
             })}
           </View>
@@ -586,7 +661,7 @@ export default function MazeScreen() {
           {...(state.status === "playing" ? panResponder.panHandlers : {})}
         >
           {state.maze.length > 0 && (
-            <MazeSvg
+            <MazeCanvas
               maze={state.maze}
               rows={state.rows}
               cols={state.cols}
@@ -600,64 +675,38 @@ export default function MazeScreen() {
           {state.status === "idle" && (
             <View style={styles.overlay}>
               <Text style={styles.overlayTitle}>Ready to play?</Text>
-              <Text style={styles.overlaySubtitle}>
-                {MAZE_SIZES[sizeIndex].label} — {MAZE_SIZES[sizeIndex].sub}
-              </Text>
-              {idleBest && (
-                <Text style={styles.overlayBest}>
-                  Best: {formatTime(idleBest.time)} in {idleBest.moves} moves
-                </Text>
-              )}
-              <TouchableOpacity
-                style={styles.startBtn}
-                onPress={() => startGame(sizeIndex)}
-                activeOpacity={0.8}
-              >
+              <Text style={styles.overlaySubtitle}>{MAZE_SIZES[sizeIndex].label} — {MAZE_SIZES[sizeIndex].sub}</Text>
+              {idleBest && <Text style={styles.overlayBest}>Best: {formatTime(idleBest.time)} in {idleBest.moves} moves</Text>}
+              <Pressable style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]} onPress={() => startGame(sizeIndex)}>
                 <Text style={styles.startBtnText}>Start Game</Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
           )}
 
           {state.status === "won" && (
             <View style={styles.overlay}>
               <Text style={styles.winEmoji}>{newRecord ? "🏆" : "🎉"}</Text>
-              <Text style={styles.winTitle}>
-                {newRecord ? "New Record!" : "Level Complete!"}
-              </Text>
+              <Text style={styles.winTitle}>{newRecord ? "New Record!" : "Level Complete!"}</Text>
               <View style={styles.winStats}>
                 <View style={styles.winStatItem}>
                   <Text style={styles.winStatLabel}>Time</Text>
                   <Text style={styles.winStatValue}>{formatTime(state.timeSeconds)}</Text>
-                  {best && !newRecord && (
-                    <Text style={styles.winStatBest}>best {formatTime(best.time)}</Text>
-                  )}
+                  {best && !newRecord && <Text style={styles.winStatBest}>best {formatTime(best.time)}</Text>}
                 </View>
                 <View style={styles.winStatItem}>
                   <Text style={styles.winStatLabel}>Moves</Text>
                   <Text style={styles.winStatValue}>{state.moves}</Text>
-                  {best && !newRecord && (
-                    <Text style={styles.winStatBest}>best {best.moves}</Text>
-                  )}
+                  {best && !newRecord && <Text style={styles.winStatBest}>best {best.moves}</Text>}
                 </View>
               </View>
-              {newRecord && (
-                <Text style={styles.recordLabel}>Personal best saved!</Text>
-              )}
+              {newRecord && <Text style={styles.recordLabel}>Personal best saved!</Text>}
               <View style={styles.winBtnRow}>
-                <TouchableOpacity
-                  style={styles.startBtn}
-                  onPress={() => startGame(sizeIndex)}
-                  activeOpacity={0.8}
-                >
+                <Pressable style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]} onPress={() => startGame(sizeIndex)}>
                   <Text style={styles.startBtnText}>Play Again</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.secondaryBtn}
-                  onPress={() => dispatch({ type: "RESET" })}
-                  activeOpacity={0.7}
-                >
+                </Pressable>
+                <Pressable style={({ pressed }) => [styles.secondaryBtn, pressed && styles.secondaryBtnPressed]} onPress={() => dispatch({ type: "RESET" })}>
                   <Text style={styles.secondaryBtnText}>Change Level</Text>
-                </TouchableOpacity>
+                </Pressable>
               </View>
             </View>
           )}
@@ -665,31 +714,28 @@ export default function MazeScreen() {
 
         {state.status === "playing" && (
           <View style={styles.controls}>
-            <Text style={styles.swipeHint}>Swipe on the maze or use the D-pad below</Text>
+            <Text style={styles.swipeHint}>Swipe or hold D-pad to move continuously</Text>
             <View style={styles.hintRow}>
-              <TouchableOpacity
-                style={[styles.hintBtn, showHint && styles.hintBtnActive]}
+              <Pressable
+                style={({ pressed }) => [styles.hintBtn, showHint && styles.hintBtnActive, pressed && styles.btnPressed]}
                 onPress={() => { setShowHint((v) => !v); haptic("light"); }}
-                activeOpacity={0.7}
               >
                 <Text style={[styles.hintBtnText, showHint && styles.hintBtnTextActive]}>
                   {showHint ? "Hide Hint" : "💡 Hint"}
                 </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.resetBtn}
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [styles.resetBtn, pressed && styles.btnPressed]}
                 onPress={() => startGame(sizeIndex)}
-                activeOpacity={0.7}
               >
                 <Text style={styles.resetBtnText}>New Maze</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.resetBtn}
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [styles.resetBtn, pressed && styles.btnPressed]}
                 onPress={() => dispatch({ type: "RESET" })}
-                activeOpacity={0.7}
               >
                 <Text style={styles.resetBtnText}>Change Level</Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
             <DPad onMove={move} />
           </View>
@@ -713,12 +759,8 @@ export default function MazeScreen() {
                       <Text style={styles.bestTableLevel}>{s.label}</Text>
                       <Text style={styles.bestTableSub}>{s.sub}</Text>
                     </View>
-                    <Text style={[styles.bestTableCell, styles.bestTimeText, { textAlign: "right" }]}>
-                      {formatTime(b.time)}
-                    </Text>
-                    <Text style={[styles.bestTableCell, styles.bestMovesText, { textAlign: "right" }]}>
-                      {b.moves}
-                    </Text>
+                    <Text style={[styles.bestTableCell, styles.bestTimeText, { textAlign: "right" }]}>{formatTime(b.time)}</Text>
+                    <Text style={[styles.bestTableCell, styles.bestMovesText, { textAlign: "right" }]}>{b.moves}</Text>
                   </View>
                 );
               })}
@@ -731,6 +773,9 @@ export default function MazeScreen() {
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
+
+const DPAD_BTN = 66;
+const DPAD_GAP = 6;
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#0f1117" },
@@ -753,14 +798,16 @@ const styles = StyleSheet.create({
   sizeBtnSub: { color: "#475569", fontSize: 11, marginTop: 1 },
   sizeBtnSubActive: { color: "rgba(255,255,255,0.7)" },
   sizeBtnBest: { color: "#374151", fontSize: 9, marginTop: 2 },
-  mazeContainer: { borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", position: "relative" },
+  mazeContainer: { borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,17,23,0.93)", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 12 },
   overlayTitle: { color: "#a5b4fc", fontSize: 22, fontWeight: "bold" },
   overlaySubtitle: { color: "#94a3b8", fontSize: 14 },
   overlayBest: { color: "#475569", fontSize: 12, marginTop: -4 },
   startBtn: { backgroundColor: "#4f46e5", paddingHorizontal: 28, paddingVertical: 13, borderRadius: 13, marginTop: 4 },
+  startBtnPressed: { backgroundColor: "#4338ca" },
   startBtnText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
   secondaryBtn: { backgroundColor: "rgba(255,255,255,0.08)", paddingHorizontal: 20, paddingVertical: 13, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)" },
+  secondaryBtnPressed: { backgroundColor: "rgba(255,255,255,0.14)" },
   secondaryBtnText: { color: "#94a3b8", fontSize: 15, fontWeight: "600" },
   winEmoji: { fontSize: 44 },
   winTitle: { color: "#fbbf24", fontSize: 24, fontWeight: "bold" },
@@ -780,11 +827,15 @@ const styles = StyleSheet.create({
   hintBtnTextActive: { color: "#22d3ee" },
   resetBtn: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" },
   resetBtnText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
-  dpadContainer: { alignItems: "center" },
-  dpadRow: { flexDirection: "row", alignItems: "center" },
-  dpadBtn: { borderRadius: 16, backgroundColor: "#1a1f33", borderWidth: 1, borderColor: "#252b45", alignItems: "center", justifyContent: "center" },
-  dpadArrow: { color: "rgba(255,255,255,0.8)", fontSize: 20 },
-  dpadCenter: { borderRadius: 16, backgroundColor: "rgba(255,255,255,0.03)", borderWidth: 1, borderColor: "#1e2438" },
+  btnPressed: { opacity: 0.65 },
+  dpadContainer: { alignItems: "center", gap: DPAD_GAP },
+  dpadRow: { flexDirection: "row", alignItems: "center", gap: DPAD_GAP },
+  dpadSpacer: { width: DPAD_BTN, height: DPAD_BTN },
+  dpadBtn: { width: DPAD_BTN, height: DPAD_BTN, borderRadius: 18, backgroundColor: "#1a1f33", borderWidth: 1.5, borderColor: "#2a3050", alignItems: "center", justifyContent: "center" },
+  dpadBtnPressed: { backgroundColor: "#3730a3", borderColor: "#818cf8" },
+  dpadArrow: { color: "rgba(255,255,255,0.75)", fontSize: 22 },
+  dpadArrowPressed: { color: "#fff" },
+  dpadCenter: { width: DPAD_BTN, height: DPAD_BTN, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.02)", borderWidth: 1, borderColor: "#1a1f2e" },
   bestTable: { marginTop: 20, width: "100%", maxWidth: 380 },
   bestTableTitle: { color: "#475569", fontSize: 11, fontWeight: "600", textAlign: "center", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 },
   bestTableContainer: { borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", overflow: "hidden" },
