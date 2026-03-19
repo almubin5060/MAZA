@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useReducer } from "react";
+import { useEffect, useRef, useCallback, useReducer, useState } from "react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,6 +87,55 @@ function generateMaze(rows: number, cols: number): Cell[][] {
   return grid;
 }
 
+// ─── BFS Pathfinder ──────────────────────────────────────────────────────────
+
+function findPath(
+  maze: Cell[][],
+  rows: number,
+  cols: number,
+  startRow: number,
+  startCol: number
+): Set<string> {
+  // BFS from (startRow, startCol) to (rows-1, cols-1)
+  const endRow = rows - 1;
+  const endCol = cols - 1;
+  const queue: [number, number, [number, number][]][] = [
+    [startRow, startCol, [[startRow, startCol]]],
+  ];
+  const visited = new Set<string>();
+  visited.add(`${startRow},${startCol}`);
+
+  while (queue.length > 0) {
+    const [r, c, path] = queue.shift()!;
+    if (r === endRow && c === endCol) {
+      // Return set of "row,col" strings for fast lookup
+      return new Set(path.map(([pr, pc]) => `${pr},${pc}`));
+    }
+    const cell = maze[r][c];
+    const moves = [
+      { dr: -1, dc: 0, wall: "top" as const },
+      { dr: 1, dc: 0, wall: "bottom" as const },
+      { dr: 0, dc: 1, wall: "right" as const },
+      { dr: 0, dc: -1, wall: "left" as const },
+    ];
+    for (const { dr, dc, wall } of moves) {
+      const nr = r + dr;
+      const nc = c + dc;
+      const key = `${nr},${nc}`;
+      if (
+        nr >= 0 && nr < rows &&
+        nc >= 0 && nc < cols &&
+        !cell.walls[wall] &&
+        !visited.has(key)
+      ) {
+        visited.add(key);
+        queue.push([nr, nc, [...path, [nr, nc]]]);
+      }
+    }
+  }
+  return new Set();
+}
+
 // ─── Reducer ─────────────────────────────────────────────────────────────────
 
 function reducer(state: GameState, action: Action): GameState {
@@ -154,6 +203,7 @@ export default function MazeGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sizeIndex, setSizeIndex] = useReducer((_: number, v: number) => v, 1);
+  const [showHint, setShowHint] = useState(false);
 
   const [state, dispatch] = useReducer(reducer, {
     maze: [],
@@ -173,6 +223,7 @@ export default function MazeGame() {
       const { rows, cols } = MAZE_SIZES[idx];
       const maze = generateMaze(rows, cols);
       dispatch({ type: "INIT_MAZE", maze, rows, cols });
+      setShowHint(false);
     },
     []
   );
@@ -241,15 +292,40 @@ export default function MazeGame() {
     ctx.fillStyle = "#0f1117";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Draw paths first (cells)
+    // Compute hint path from current player position when hint is on
+    const hintPath = showHint
+      ? findPath(maze, rows, cols, playerRow, playerCol)
+      : new Set<string>();
+
+    // Draw cell interiors
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const x = offsetX + c * cellSize;
         const y = offsetY + r * cellSize;
+        const key = `${r},${c}`;
+        const onPath = hintPath.has(key);
 
-        // Cell interior (path color)
-        ctx.fillStyle = "#1e2030";
+        if (onPath) {
+          // Hint path — soft cyan/teal highlight
+          ctx.fillStyle = "rgba(6, 182, 212, 0.22)";
+        } else {
+          ctx.fillStyle = "#1e2030";
+        }
         ctx.fillRect(x + 1, y + 1, cellSize - 1, cellSize - 1);
+
+        // Draw a small dot on the path cells (skip player + start + goal)
+        if (
+          onPath &&
+          !(r === playerRow && c === playerCol) &&
+          !(r === 0 && c === 0) &&
+          !(r === rows - 1 && c === cols - 1)
+        ) {
+          const dotR = Math.max(1.5, cellSize * 0.14);
+          ctx.fillStyle = "rgba(34, 211, 238, 0.65)";
+          ctx.beginPath();
+          ctx.arc(x + cellSize / 2, y + cellSize / 2, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
@@ -339,7 +415,7 @@ export default function MazeGame() {
     ctx.fill();
 
     void pad;
-  }, [state]);
+  }, [state, showHint]);
 
   // ── Format time ────────────────────────────────────────────────────────────
 
@@ -512,6 +588,16 @@ export default function MazeGame() {
           </div>
 
           <div className="flex flex-wrap gap-2 justify-center max-w-lg">
+            <button
+              onClick={() => setShowHint((h) => !h)}
+              className={`px-5 py-2 rounded-lg text-sm font-semibold border transition-all ${
+                showHint
+                  ? "bg-cyan-500 border-cyan-400 text-white shadow-lg shadow-cyan-900/50"
+                  : "bg-white/10 border-white/10 text-cyan-300 hover:bg-cyan-900/30 hover:border-cyan-700"
+              }`}
+            >
+              {showHint ? "💡 Hide Hint" : "💡 Hint"}
+            </button>
             <button
               onClick={() => startGame(sizeIndex)}
               className="px-5 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm text-gray-200 font-medium transition-all"
