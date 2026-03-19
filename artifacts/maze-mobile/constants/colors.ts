@@ -1,4 +1,18 @@
-const C = {
+const Colors = {
+  light: {
+    tint: "#6C6FFF",
+    tabIconDefault: "#64748B",
+    tabIconSelected: "#6C6FFF",
+    background: "#ffffff",
+    text: "#000000",
+  },
+  dark: {
+    tint: "#6C6FFF",
+    tabIconDefault: "#64748B",
+    tabIconSelected: "#6C6FFF",
+    background: "#0D0F14",
+    text: "#E2E8F0",
+  },
   bg: "#0D0F14",
   cell: "#141824",
   wall: "#3A4060",
@@ -20,4 +34,4 @@ const C = {
   winBg: "rgba(13,15,20,0.96)",
 };
 
-export default C;
+export default Colors;
