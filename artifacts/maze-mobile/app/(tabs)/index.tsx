@@ -25,8 +25,34 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Rect, Text as SvgText } from "react-native-svg";
+import { Feather } from "@expo/vector-icons";
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+
+// ─── Theme ───────────────────────────────────────────────────────────────────
+
+const T = {
+  bg: "#09090F",
+  surface: "#0C0D16",
+  card: "#111420",
+  cardAlt: "#0F1119",
+  border: "#1B1D2C",
+  borderBright: "#252840",
+  cyan: "#00D4AA",
+  cyanDim: "rgba(0,212,170,0.12)",
+  cyanGlow: "rgba(0,212,170,0.3)",
+  purple: "#9B5CF6",
+  purpleDim: "rgba(155,92,246,0.15)",
+  pink: "#F472B6",
+  pinkDim: "rgba(244,114,182,0.15)",
+  pinkGlow: "rgba(244,114,182,0.4)",
+  green: "#34D399",
+  greenDim: "rgba(52,211,153,0.15)",
+  text: "#E2E8F0",
+  textSub: "#8B9CC8",
+  textMuted: "#4A5580",
+  textDim: "#252840",
+};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,7 +62,6 @@ interface Cell {
   walls: { top: boolean; right: boolean; bottom: boolean; left: boolean };
   visited: boolean;
 }
-
 interface GameState {
   maze: Cell[][];
   playerRow: number;
@@ -47,108 +72,74 @@ interface GameState {
   cols: number;
   rows: number;
 }
-
 type Action =
   | { type: "INIT_MAZE"; maze: Cell[][]; rows: number; cols: number }
   | { type: "MOVE"; dr: number; dc: number }
   | { type: "TICK" }
   | { type: "RESET" };
-
-interface BestScore {
-  time: number;
-  moves: number;
-}
+interface BestScore { time: number; moves: number }
 
 // ─── Maze Generation ─────────────────────────────────────────────────────────
 
 function createGrid(rows: number, cols: number): Cell[][] {
   return Array.from({ length: rows }, (_, r) =>
     Array.from({ length: cols }, (_, c) => ({
-      row: r,
-      col: c,
+      row: r, col: c,
       walls: { top: true, right: true, bottom: true, left: true },
       visited: false,
     }))
   );
 }
-
 function generateMaze(rows: number, cols: number): Cell[][] {
   const grid = createGrid(rows, cols);
-  const directions = [
+  const dirs = [
     { dr: -1, dc: 0, wall: "top" as const, opposite: "bottom" as const },
     { dr: 0, dc: 1, wall: "right" as const, opposite: "left" as const },
     { dr: 1, dc: 0, wall: "bottom" as const, opposite: "top" as const },
     { dr: 0, dc: -1, wall: "left" as const, opposite: "right" as const },
   ];
-  function shuffle<T>(arr: T[]): T[] {
-    const a = [...arr];
-    for (let i = a.length - 1; i > 0; i--) {
+  const shuffle = <T,>(a: T[]) => {
+    const arr = [...a];
+    for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
+      [arr[i], arr[j]] = [arr[j], arr[i]];
     }
-    return a;
-  }
-  const stack: [number, number][] = [];
+    return arr;
+  };
+  const stack: [number, number][] = [[0, 0]];
   grid[0][0].visited = true;
-  stack.push([0, 0]);
   while (stack.length > 0) {
     const [r, c] = stack[stack.length - 1];
-    const neighbors = shuffle(directions).filter(({ dr, dc }) => {
-      const nr = r + dr;
-      const nc = c + dc;
+    const nb = shuffle(dirs).filter(({ dr, dc }) => {
+      const nr = r + dr; const nc = c + dc;
       return nr >= 0 && nr < rows && nc >= 0 && nc < cols && !grid[nr][nc].visited;
     });
-    if (neighbors.length === 0) {
-      stack.pop();
-    } else {
-      const { dr, dc, wall, opposite } = neighbors[0];
-      const nr = r + dr;
-      const nc = c + dc;
-      grid[r][c].walls[wall] = false;
-      grid[nr][nc].walls[opposite] = false;
-      grid[nr][nc].visited = true;
-      stack.push([nr, nc]);
-    }
+    if (!nb.length) { stack.pop(); continue; }
+    const { dr, dc, wall, opposite } = nb[0];
+    const nr = r + dr; const nc = c + dc;
+    grid[r][c].walls[wall] = false;
+    grid[nr][nc].walls[opposite] = false;
+    grid[nr][nc].visited = true;
+    stack.push([nr, nc]);
   }
   return grid;
 }
 
-// ─── BFS Pathfinder ──────────────────────────────────────────────────────────
+// ─── BFS ─────────────────────────────────────────────────────────────────────
 
-function findPath(
-  maze: Cell[][],
-  rows: number,
-  cols: number,
-  startRow: number,
-  startCol: number
-): Set<string> {
-  const endRow = rows - 1;
-  const endCol = cols - 1;
-  const queue: [number, number, [number, number][]][] = [
-    [startRow, startCol, [[startRow, startCol]]],
-  ];
-  const visited = new Set<string>();
-  visited.add(`${startRow},${startCol}`);
-  while (queue.length > 0) {
-    const [r, c, path] = queue.shift()!;
-    if (r === endRow && c === endCol)
-      return new Set(path.map(([pr, pc]) => `${pr},${pc}`));
-    const cell = maze[r][c];
+function findPath(maze: Cell[][], rows: number, cols: number, sr: number, sc: number): Set<string> {
+  const q: [number, number, [number, number][]][] = [[sr, sc, [[sr, sc]]]];
+  const vis = new Set<string>([`${sr},${sc}`]);
+  while (q.length) {
+    const [r, c, path] = q.shift()!;
+    if (r === rows - 1 && c === cols - 1) return new Set(path.map(([a, b]) => `${a},${b}`));
     for (const { dr, dc, wall } of [
-      { dr: -1, dc: 0, wall: "top" as const },
-      { dr: 1, dc: 0, wall: "bottom" as const },
-      { dr: 0, dc: 1, wall: "right" as const },
-      { dr: 0, dc: -1, wall: "left" as const },
+      { dr: -1, dc: 0, wall: "top" as const }, { dr: 1, dc: 0, wall: "bottom" as const },
+      { dr: 0, dc: 1, wall: "right" as const }, { dr: 0, dc: -1, wall: "left" as const },
     ]) {
-      const nr = r + dr;
-      const nc = c + dc;
-      const key = `${nr},${nc}`;
-      if (
-        nr >= 0 && nr < rows && nc >= 0 && nc < cols &&
-        !cell.walls[wall] && !visited.has(key)
-      ) {
-        visited.add(key);
-        queue.push([nr, nc, [...path, [nr, nc]]]);
+      const nr = r + dr; const nc = c + dc; const key = `${nr},${nc}`;
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !maze[r][c].walls[wall] && !vis.has(key)) {
+        vis.add(key); q.push([nr, nc, [...path, [nr, nc]]]);
       }
     }
   }
@@ -159,692 +150,532 @@ function findPath(
 
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
-    case "INIT_MAZE":
-      return {
-        ...state,
-        maze: action.maze,
-        rows: action.rows,
-        cols: action.cols,
-        playerRow: 0,
-        playerCol: 0,
-        moves: 0,
-        timeSeconds: 0,
-        status: "playing",
-      };
+    case "INIT_MAZE": return { ...state, maze: action.maze, rows: action.rows, cols: action.cols, playerRow: 0, playerCol: 0, moves: 0, timeSeconds: 0, status: "playing" };
     case "MOVE": {
       if (state.status !== "playing") return state;
       const { dr, dc } = action;
-      const { playerRow: r, playerCol: c, maze } = state;
-      const cell = maze[r][c];
-      if (
-        (dr === -1 && cell.walls.top) ||
-        (dr === 1 && cell.walls.bottom) ||
-        (dc === 1 && cell.walls.right) ||
-        (dc === -1 && cell.walls.left)
-      )
-        return state;
-      const nr = r + dr;
-      const nc = c + dc;
+      const cell = state.maze[state.playerRow][state.playerCol];
+      if ((dr === -1 && cell.walls.top) || (dr === 1 && cell.walls.bottom) ||
+          (dc === 1 && cell.walls.right) || (dc === -1 && cell.walls.left)) return state;
+      const nr = state.playerRow + dr; const nc = state.playerCol + dc;
       if (nr < 0 || nr >= state.rows || nc < 0 || nc >= state.cols) return state;
-      return {
-        ...state,
-        playerRow: nr,
-        playerCol: nc,
-        moves: state.moves + 1,
-        status: nr === state.rows - 1 && nc === state.cols - 1 ? "won" : "playing",
-      };
+      return { ...state, playerRow: nr, playerCol: nc, moves: state.moves + 1,
+        status: nr === state.rows - 1 && nc === state.cols - 1 ? "won" : "playing" };
     }
-    case "TICK":
-      if (state.status !== "playing") return state;
-      return { ...state, timeSeconds: state.timeSeconds + 1 };
-    case "RESET":
-      return { ...state, maze: [], playerRow: 0, playerCol: 0, moves: 0, timeSeconds: 0, status: "idle" };
-    default:
-      return state;
+    case "TICK": return state.status === "playing" ? { ...state, timeSeconds: state.timeSeconds + 1 } : state;
+    case "RESET": return { ...state, maze: [], playerRow: 0, playerCol: 0, moves: 0, timeSeconds: 0, status: "idle" };
+    default: return state;
   }
 }
 
-// ─── Best Score Helpers ───────────────────────────────────────────────────────
+// ─── Storage ─────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "@maze_best_scores";
-
-async function loadBestScores(): Promise<Record<string, BestScore>> {
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+const STORAGE_KEY = "@maze_best_scores_v2";
+async function loadBests(): Promise<Record<string, BestScore>> {
+  try { const r = await AsyncStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : {}; } catch { return {}; }
 }
-
-async function saveBestScore(
-  key: string,
-  time: number,
-  moves: number,
-  current: Record<string, BestScore>
-): Promise<{ updated: Record<string, BestScore>; isNew: boolean }> {
-  const prev = current[key];
+async function saveBest(key: string, time: number, moves: number, cur: Record<string, BestScore>) {
+  const prev = cur[key];
   const isNew = !prev || time < prev.time || (time === prev.time && moves < prev.moves);
-  if (!isNew) return { updated: current, isNew: false };
-  const updated = { ...current, [key]: { time, moves } };
-  try {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-  } catch {}
+  if (!isNew) return { updated: cur, isNew: false };
+  const updated = { ...cur, [key]: { time, moves } };
+  try { await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated)); } catch {}
   return { updated, isNew: true };
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const MAZE_SIZES = [
-  { label: "Easy", sub: "10×10", rows: 10, cols: 10 },
-  { label: "Medium", sub: "15×15", rows: 15, cols: 15 },
-  { label: "Hard", sub: "20×20", rows: 20, cols: 20 },
-  { label: "Harder", sub: "30×30", rows: 30, cols: 30 },
-  { label: "Hardest", sub: "40×40", rows: 40, cols: 40 },
-  { label: "GOD", sub: "50×50", rows: 50, cols: 50 },
+const LEVELS = [
+  { label: "EASY", sub: "10×10", desc: "Training grounds. Low density walls.", rows: 10, cols: 10, accentColor: T.green, icon: "😀" },
+  { label: "MEDIUM", sub: "15×15", desc: "Standard logic required. Dynamic paths.", rows: 15, cols: 15, accentColor: T.pink, icon: "🎮" },
+  { label: "HARD", sub: "20×20", desc: "Advanced algorithms. Shifting corridors.", rows: 20, cols: 20, accentColor: T.purple, icon: "⚙️" },
+  { label: "HARDER", sub: "30×30", desc: "Complex routing. High wall density.", rows: 30, cols: 30, accentColor: T.pink, icon: "🔥" },
+  { label: "HARDEST", sub: "40×40", desc: "Near-impossible paths. Extreme logic.", rows: 40, cols: 40, accentColor: "#FF6B6B", icon: "💀" },
+  { label: "GOD MODE", sub: "50×50", desc: "No hints. No mercy. 2500 cells to survive.", rows: 50, cols: 50, accentColor: T.cyan, icon: "⚡" },
 ];
-
-const formatTime = (s: number) => {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${sec.toString().padStart(2, "0")}`;
-};
-
-function haptic(type: "light" | "medium" | "success" | "error") {
+const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+function haptic(t: "light" | "medium" | "success" | "error") {
   if (Platform.OS === "web") return;
   try {
-    if (type === "light") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    else if (type === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    else if (type === "success") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    else if (type === "error") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    if (t === "light") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    else if (t === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    else if (t === "success") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    else if (t === "error") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
   } catch {}
 }
 
-// ─── Static Maze Grid (memoized) ─────────────────────────────────────────────
+// ─── Header ───────────────────────────────────────────────────────────────────
 
-interface StaticGridProps {
-  maze: Cell[][];
-  rows: number;
-  cols: number;
-  cellSize: number;
-  offX: number;
-  offY: number;
-  size: number;
+function Header() {
+  return (
+    <View style={s.header}>
+      <View style={s.headerIcon}>
+        <Feather name="grid" size={18} color={T.cyan} />
+      </View>
+      <Text style={s.headerTitle}>MAZE</Text>
+      <View style={{ flex: 1 }} />
+      <Pressable style={s.headerGear}>
+        <Feather name="settings" size={18} color={T.textMuted} />
+      </Pressable>
+    </View>
+  );
 }
+
+// ─── Static Grid (memoized) ───────────────────────────────────────────────────
 
 const StaticGrid = React.memo(function StaticGrid({
   maze, rows, cols, cellSize, offX, offY, size,
-}: StaticGridProps) {
-  const cellRects: React.ReactNode[] = [];
-  const wallLines: React.ReactNode[] = [];
-
+}: { maze: Cell[]; rows: number; cols: number; cellSize: number; offX: number; offY: number; size: number }) {
+  const cells: React.ReactNode[] = [];
+  const walls: React.ReactNode[] = [];
+  const flatMaze = maze as unknown as Cell[][];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const x = offX + c * cellSize;
-      const y = offY + r * cellSize;
-      const isStart = r === 0 && c === 0;
-      const isGoal = r === rows - 1 && c === cols - 1;
-
-      cellRects.push(
-        <Rect
-          key={`c-${r}-${c}`}
-          x={x + 1} y={y + 1}
-          width={cellSize - 1} height={cellSize - 1}
-          fill={isStart ? "rgba(34,211,153,0.22)" : isGoal ? "rgba(251,191,36,0.22)" : "#1e2030"}
-        />
-      );
-
-      const { walls } = maze[r][c];
-      if (walls.top) wallLines.push(<Line key={`wt-${r}-${c}`} x1={x} y1={y} x2={x + cellSize} y2={y} stroke="#4a5070" strokeWidth={1.5} />);
-      if (walls.right) wallLines.push(<Line key={`wr-${r}-${c}`} x1={x + cellSize} y1={y} x2={x + cellSize} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
-      if (walls.bottom) wallLines.push(<Line key={`wb-${r}-${c}`} x1={x} y1={y + cellSize} x2={x + cellSize} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
-      if (walls.left) wallLines.push(<Line key={`wl-${r}-${c}`} x1={x} y1={y} x2={x} y2={y + cellSize} stroke="#4a5070" strokeWidth={1.5} />);
+      const x = offX + c * cellSize; const y = offY + r * cellSize;
+      const PAD = 1;
+      cells.push(<Rect key={`c${r}-${c}`} x={x + PAD} y={y + PAD} width={cellSize - PAD} height={cellSize - PAD} fill={T.card} rx={1} />);
+      const w = flatMaze[r][c].walls;
+      if (w.top)    walls.push(<Line key={`wt${r}-${c}`} x1={x} y1={y} x2={x + cellSize} y2={y} stroke={T.borderBright} strokeWidth={1.5} />);
+      if (w.right)  walls.push(<Line key={`wr${r}-${c}`} x1={x + cellSize} y1={y} x2={x + cellSize} y2={y + cellSize} stroke={T.borderBright} strokeWidth={1.5} />);
+      if (w.bottom) walls.push(<Line key={`wb${r}-${c}`} x1={x} y1={y + cellSize} x2={x + cellSize} y2={y + cellSize} stroke={T.borderBright} strokeWidth={1.5} />);
+      if (w.left)   walls.push(<Line key={`wl${r}-${c}`} x1={x} y1={y} x2={x} y2={y + cellSize} stroke={T.borderBright} strokeWidth={1.5} />);
     }
   }
-
-  const fontSize = Math.max(6, cellSize - 6);
-
-  return (
-    <>
-      <Rect x={0} y={0} width={size} height={size} fill="#0f1117" />
-      {cellRects}
-      {wallLines}
-      <SvgText
-        x={offX + cellSize / 2} y={offY + cellSize / 2 + fontSize * 0.36}
-        fontSize={fontSize} fontWeight="bold" fill="#34d399" textAnchor="middle"
-      >S</SvgText>
-      <SvgText
-        x={offX + (cols - 1) * cellSize + cellSize / 2}
-        y={offY + (rows - 1) * cellSize + cellSize / 2 + fontSize * 0.36}
-        fontSize={fontSize} fontWeight="bold" fill="#fbbf24" textAnchor="middle"
-      >G</SvgText>
-    </>
-  );
+  return <>{cells}{walls}</>;
 });
 
 // ─── Maze Canvas ─────────────────────────────────────────────────────────────
 
-interface MazeCanvasProps {
-  maze: Cell[][];
-  rows: number;
-  cols: number;
-  playerRow: number;
-  playerCol: number;
-  hintPath: Set<string>;
-  size: number;
-}
+function MazeCanvas({ maze, rows, cols, playerRow, playerCol, hintPath, size }: {
+  maze: Cell[][]; rows: number; cols: number; playerRow: number; playerCol: number; hintPath: Set<string>; size: number;
+}) {
+  const cs = Math.floor(size / Math.max(rows, cols));
+  const offX = Math.floor((size - cs * cols) / 2);
+  const offY = Math.floor((size - cs * rows) / 2);
+  const pr = Math.max(3, Math.floor(cs * 0.32));
 
-function MazeCanvas({ maze, rows, cols, playerRow, playerCol, hintPath, size }: MazeCanvasProps) {
-  const cellSize = Math.floor(size / Math.max(rows, cols));
-  const totalW = cellSize * cols;
-  const totalH = cellSize * rows;
-  const offX = Math.floor((size - totalW) / 2);
-  const offY = Math.floor((size - totalH) / 2);
-
-  const radius = Math.max(3, Math.floor(cellSize * 0.3));
-
-  const targetCx = offX + playerCol * cellSize + cellSize / 2;
-  const targetCy = offY + playerRow * cellSize + cellSize / 2;
-
-  const cx = useSharedValue(targetCx);
-  const cy = useSharedValue(targetCy);
+  const tCx = offX + playerCol * cs + cs / 2;
+  const tCy = offY + playerRow * cs + cs / 2;
+  const cx = useSharedValue(tCx);
+  const cy = useSharedValue(tCy);
 
   useEffect(() => {
-    cx.value = withSpring(targetCx, { damping: 18, stiffness: 320, mass: 0.6 });
-    cy.value = withSpring(targetCy, { damping: 18, stiffness: 320, mass: 0.6 });
-  }, [targetCx, targetCy]);
+    cx.value = withSpring(tCx, { damping: 18, stiffness: 340, mass: 0.55 });
+    cy.value = withSpring(tCy, { damping: 18, stiffness: 340, mass: 0.55 });
+  }, [tCx, tCy]);
 
-  const animatedPlayerProps = useAnimatedProps(() => ({
-    cx: cx.value,
-    cy: cy.value,
-  }));
+  const aInner = useAnimatedProps(() => ({ cx: cx.value, cy: cy.value }));
+  const aOuter = useAnimatedProps(() => ({ cx: cx.value, cy: cy.value }));
 
-  const animatedGlowProps = useAnimatedProps(() => ({
-    cx: cx.value - radius * 0.2,
-    cy: cy.value - radius * 0.25,
-  }));
-
-  const hintDots = useMemo(() => {
-    const dots: React.ReactNode[] = [];
+  const hintEls = useMemo(() => {
+    const els: React.ReactNode[] = [];
     hintPath.forEach((key) => {
       const [r, c] = key.split(",").map(Number);
-      const isPlayer = r === playerRow && c === playerCol;
-      const isStart = r === 0 && c === 0;
-      const isGoal = r === rows - 1 && c === cols - 1;
-      if (!isPlayer && !isStart && !isGoal) {
-        const x = offX + c * cellSize;
-        const y = offY + r * cellSize;
-        const dotR = Math.max(1.5, cellSize * 0.13);
-        dots.push(
-          <Circle
-            key={key}
-            cx={x + cellSize / 2} cy={y + cellSize / 2}
-            r={dotR} fill="rgba(34,211,238,0.65)"
-          />
-        );
-      }
+      if ((r === playerRow && c === playerCol) || (r === 0 && c === 0) || (r === rows - 1 && c === cols - 1)) return;
+      const x = offX + c * cs; const y = offY + r * cs;
+      els.push(
+        <React.Fragment key={key}>
+          <Rect x={x + 1} y={y + 1} width={cs - 1} height={cs - 1} fill={T.cyanDim} />
+          <Circle cx={x + cs / 2} cy={y + cs / 2} r={Math.max(1.5, cs * 0.12)} fill={T.cyan} opacity={0.6} />
+        </React.Fragment>
+      );
     });
-    return dots;
-  }, [hintPath, playerRow, playerCol, offX, offY, cellSize, rows, cols]);
+    return els;
+  }, [hintPath, playerRow, playerCol, offX, offY, cs, rows, cols]);
 
-  const hintCellHighlights = useMemo(() => {
-    const highlights: React.ReactNode[] = [];
-    hintPath.forEach((key) => {
-      const [r, c] = key.split(",").map(Number);
-      const isStart = r === 0 && c === 0;
-      const isGoal = r === rows - 1 && c === cols - 1;
-      if (!isStart && !isGoal) {
-        const x = offX + c * cellSize;
-        const y = offY + r * cellSize;
-        highlights.push(
-          <Rect
-            key={`hl-${key}`}
-            x={x + 1} y={y + 1}
-            width={cellSize - 1} height={cellSize - 1}
-            fill="rgba(6,182,212,0.15)"
-          />
-        );
-      }
-    });
-    return highlights;
-  }, [hintPath, offX, offY, cellSize, rows, cols]);
+  const goalX = offX + (cols - 1) * cs + cs / 2;
+  const goalY = offY + (rows - 1) * cs + cs / 2;
 
   return (
     <Svg width={size} height={size}>
-      <StaticGrid
-        maze={maze} rows={rows} cols={cols}
-        cellSize={cellSize} offX={offX} offY={offY} size={size}
-      />
-      {hintCellHighlights}
-      {hintDots}
-      <AnimatedCircle animatedProps={animatedPlayerProps} r={radius} fill="#818cf8" opacity={0.95} />
-      <AnimatedCircle animatedProps={animatedGlowProps} r={radius * 0.4} fill="rgba(255,255,255,0.5)" />
+      <Rect x={0} y={0} width={size} height={size} fill={T.bg} />
+      <StaticGrid maze={maze as any} rows={rows} cols={cols} cellSize={cs} offX={offX} offY={offY} size={size} />
+      {/* Start cell highlight */}
+      <Rect x={offX + 1} y={offY + 1} width={cs - 1} height={cs - 1} fill={T.cyanDim} />
+      {/* Goal cell highlight */}
+      <Rect x={offX + (cols - 1) * cs + 1} y={offY + (rows - 1) * cs + 1} width={cs - 1} height={cs - 1} fill={T.pinkDim} />
+      {hintEls}
+      {/* Goal dot (pink glowing) */}
+      <Circle cx={goalX} cy={goalY} r={pr * 1.4} fill={T.pinkDim} />
+      <Circle cx={goalX} cy={goalY} r={pr * 0.65} fill={T.pink} opacity={0.9} />
+      <Circle cx={goalX} cy={goalY} r={pr * 0.28} fill="#fff" opacity={0.7} />
+      {/* Player: animated cyan target */}
+      <AnimatedCircle animatedProps={aOuter} r={pr * 1.2} fill="none" stroke={T.cyan} strokeWidth={1.5} opacity={0.5} />
+      <AnimatedCircle animatedProps={aInner} r={pr * 0.75} fill={T.cyanDim} stroke={T.cyan} strokeWidth={1.5} />
+      <AnimatedCircle animatedProps={aInner} r={pr * 0.3} fill={T.cyan} />
     </Svg>
   );
 }
 
-// ─── D-Pad with Hold-to-Repeat ────────────────────────────────────────────────
+// ─── D-Pad ────────────────────────────────────────────────────────────────────
 
-const INITIAL_DELAY = 300;
-const REPEAT_INTERVAL = 100;
+const INITIAL_DELAY = 280;
+const REPEAT_MS = 95;
 
-interface DPadProps {
-  onMove: (dr: number, dc: number) => void;
-  disabled?: boolean;
-}
-
-function DPadButton({
-  dr, dc, label, onMove,
-}: { dr: number; dc: number; label: string; onMove: (dr: number, dc: number) => void }) {
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+function DPadBtn({ dr, dc, onMove, children }: { dr: number; dc: number; onMove: (dr: number, dc: number) => void; children: React.ReactNode }) {
   const [pressed, setPressed] = useState(false);
-
-  const stopRepeat = useCallback(() => {
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+  const ivRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const toRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stop = () => {
+    if (ivRef.current) { clearInterval(ivRef.current); ivRef.current = null; }
+    if (toRef.current) { clearTimeout(toRef.current); toRef.current = null; }
     setPressed(false);
-  }, []);
-
-  const startRepeat = useCallback(() => {
+  };
+  const start = () => {
     setPressed(true);
     onMove(dr, dc);
-    timeoutRef.current = setTimeout(() => {
-      intervalRef.current = setInterval(() => {
-        onMove(dr, dc);
-      }, REPEAT_INTERVAL);
-    }, INITIAL_DELAY);
-  }, [dr, dc, onMove]);
-
-  useEffect(() => () => stopRepeat(), []);
-
+    toRef.current = setTimeout(() => { ivRef.current = setInterval(() => onMove(dr, dc), REPEAT_MS); }, INITIAL_DELAY);
+  };
+  useEffect(() => () => stop(), []);
   return (
-    <Pressable
-      style={[styles.dpadBtn, pressed && styles.dpadBtnPressed]}
-      onPressIn={startRepeat}
-      onPressOut={stopRepeat}
-      delayLongPress={9999}
-    >
-      <Text style={[styles.dpadArrow, pressed && styles.dpadArrowPressed]}>{label}</Text>
+    <Pressable style={[dp.btn, pressed && dp.btnActive]} onPressIn={start} onPressOut={stop} delayLongPress={9999}>
+      {children}
     </Pressable>
   );
 }
 
-function DPad({ onMove }: DPadProps) {
+function DPad({ onMove }: { onMove: (dr: number, dc: number) => void }) {
+  const arrow = (dir: string) => <Feather name={dir as any} size={18} color={T.cyan} />;
   return (
-    <View style={styles.dpadContainer}>
-      <View style={styles.dpadRow}>
-        <View style={styles.dpadSpacer} />
-        <DPadButton dr={-1} dc={0} label="▲" onMove={onMove} />
-        <View style={styles.dpadSpacer} />
-      </View>
-      <View style={styles.dpadRow}>
-        <DPadButton dr={0} dc={-1} label="◀" onMove={onMove} />
-        <View style={styles.dpadCenter} />
-        <DPadButton dr={0} dc={1} label="▶" onMove={onMove} />
-      </View>
-      <View style={styles.dpadRow}>
-        <View style={styles.dpadSpacer} />
-        <DPadButton dr={1} dc={0} label="▼" onMove={onMove} />
-        <View style={styles.dpadSpacer} />
+    <View style={dp.wrap}>
+      <View style={dp.card}>
+        <View style={dp.row}>
+          <View style={dp.corner} />
+          <DPadBtn dr={-1} dc={0} onMove={onMove}>{arrow("chevron-up")}</DPadBtn>
+          <View style={dp.corner} />
+        </View>
+        <View style={dp.row}>
+          <DPadBtn dr={0} dc={-1} onMove={onMove}>{arrow("chevron-left")}</DPadBtn>
+          <View style={dp.center}><View style={dp.centerDot} /></View>
+          <DPadBtn dr={0} dc={1} onMove={onMove}>{arrow("chevron-right")}</DPadBtn>
+        </View>
+        <View style={dp.row}>
+          <View style={dp.corner} />
+          <DPadBtn dr={1} dc={0} onMove={onMove}>{arrow("chevron-down")}</DPadBtn>
+          <View style={dp.corner} />
+        </View>
       </View>
     </View>
   );
 }
 
-// ─── Main Component ──────────────────────────────────────────────────────────
+// ─── Action Buttons ───────────────────────────────────────────────────────────
+
+function ActionBtn({ label, icon, active, onPress }: { label: string; icon: string; active?: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={[ab.btn, active && ab.btnActive]} onPress={onPress}>
+      <Text style={[ab.label, active && ab.labelActive]}>{label}</Text>
+      <Feather name={icon as any} size={15} color={active ? T.cyan : T.textMuted} />
+    </Pressable>
+  );
+}
+
+// ─── Idle Screen ─────────────────────────────────────────────────────────────
+
+function IdleScreen({ sizeIndex, setSizeIndex, onStart, bestScores }: {
+  sizeIndex: number; setSizeIndex: (i: number) => void; onStart: (i: number) => void; bestScores: Record<string, BestScore>;
+}) {
+  const pairs = [[0, 1], [2, 3], [4]];
+  return (
+    <ScrollView contentContainerStyle={idle.scroll} showsVerticalScrollIndicator={false}>
+      <View style={idle.badge}><Text style={idle.badgeText}>SYSTEM INITIALIZED</Text></View>
+      <Text style={idle.title}>READY TO{"\n"}PLAY?</Text>
+      <Text style={idle.subtitle}>SELECT YOUR DIFFICULTY LEVEL</Text>
+
+      {/* Regular level cards */}
+      {LEVELS.slice(0, 5).map((lv, i) => {
+        const bk = `${lv.rows}x${lv.cols}`;
+        const b = bestScores[bk];
+        const isSelected = sizeIndex === i;
+        return (
+          <Pressable key={i} style={[idle.card, isSelected && idle.cardSelected, { borderLeftColor: lv.accentColor }]} onPress={() => setSizeIndex(i)}>
+            <View style={{ flex: 1 }}>
+              <Text style={[idle.cardLvl, { color: lv.accentColor }]}>LVL {String(i + 1).padStart(2, "0")}</Text>
+              <Text style={idle.cardName}>{lv.label}</Text>
+              <Text style={idle.cardDesc}>{lv.desc}</Text>
+              {b && <Text style={idle.cardBest}>{fmt(b.time)} · {b.moves} moves</Text>}
+            </View>
+            <View style={{ alignItems: "flex-end", gap: 6 }}>
+              <Text style={{ fontSize: 20 }}>{lv.icon}</Text>
+              <View style={[idle.cardBar, { backgroundColor: lv.accentColor }]} />
+            </View>
+          </Pressable>
+        );
+      })}
+
+      {/* GOD MODE card */}
+      {(() => {
+        const lv = LEVELS[5];
+        const b = bestScores[`${lv.rows}x${lv.cols}`];
+        const isSelected = sizeIndex === 5;
+        return (
+          <Pressable style={[idle.godCard, isSelected && idle.godCardSelected]} onPress={() => setSizeIndex(5)}>
+            <Text style={idle.godHeader}>ULTIMATE CHALLENGE</Text>
+            <Text style={idle.godTitle}>GOD MODE</Text>
+            <Text style={idle.godDesc}>{lv.desc}</Text>
+            {b && <Text style={idle.cardBest}>{fmt(b.time)} · {b.moves} moves</Text>}
+            <Text style={idle.godStars}>★  ★  ★</Text>
+          </Pressable>
+        );
+      })()}
+
+      <Pressable style={idle.startBtn} onPress={() => onStart(sizeIndex)}>
+        <Text style={idle.startBtnText}>START GAME  ▶</Text>
+      </Pressable>
+
+      <Text style={idle.statusText}>VISUAL ENGINE STATUS: ACTIVE</Text>
+    </ScrollView>
+  );
+}
+
+// ─── Game Screen ─────────────────────────────────────────────────────────────
+
+function GameScreen({ state, dispatch, showHint, setShowHint, onNewMaze, onDifficulty, move, mazeSize, hintPath, panHandlers }: any) {
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Stats */}
+      <View style={gs.statsRow}>
+        <View style={gs.statCard}>
+          <Text style={gs.statLabel}>TIME</Text>
+          <Text style={gs.statValue}>{fmt(state.timeSeconds)}</Text>
+        </View>
+        <View style={gs.statDivider} />
+        <View style={gs.statCard}>
+          <Text style={gs.statLabel}>MOVES</Text>
+          <Text style={gs.statValue}>{String(state.moves)}</Text>
+        </View>
+      </View>
+
+      {/* Maze */}
+      <View style={[gs.mazeWrap, { width: mazeSize, height: mazeSize, alignSelf: "center" }]} {...panHandlers}>
+        <MazeCanvas
+          maze={state.maze} rows={state.rows} cols={state.cols}
+          playerRow={state.playerRow} playerCol={state.playerCol}
+          hintPath={hintPath} size={mazeSize}
+        />
+      </View>
+
+      {/* Controls */}
+      <View style={gs.controlsRow}>
+        <DPad onMove={move} />
+        <View style={gs.actionBtns}>
+          <ActionBtn label="HINT" icon="zap" active={showHint} onPress={() => { setShowHint((v: boolean) => !v); haptic("light"); }} />
+          <ActionBtn label="NEW MAZE" icon="refresh-cw" onPress={onNewMaze} />
+          <ActionBtn label="DIFFICULTY" icon="bar-chart-2" onPress={onDifficulty} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ─── Win Screen ───────────────────────────────────────────────────────────────
+
+function WinScreen({ state, newRecord, best, onPlayAgain, onChangeLevel }: any) {
+  return (
+    <ScrollView contentContainerStyle={ws.scroll}>
+      <View style={ws.badge}><Text style={ws.badgeText}>{newRecord ? "NEW RECORD" : "LEVEL COMPLETE"}</Text></View>
+      <Text style={ws.emoji}>{newRecord ? "🏆" : "🎉"}</Text>
+      <Text style={ws.title}>{newRecord ? "RECORD\nBROKEN!" : "MISSION\nCOMPLETE!"}</Text>
+      <View style={ws.statsRow}>
+        <View style={ws.stat}>
+          <Text style={ws.statLabel}>TIME</Text>
+          <Text style={ws.statValue}>{fmt(state.timeSeconds)}</Text>
+          {best && !newRecord && <Text style={ws.statBest}>best {fmt(best.time)}</Text>}
+        </View>
+        <View style={ws.statDivider} />
+        <View style={ws.stat}>
+          <Text style={ws.statLabel}>MOVES</Text>
+          <Text style={ws.statValue}>{String(state.moves)}</Text>
+          {best && !newRecord && <Text style={ws.statBest}>best {best.moves}</Text>}
+        </View>
+      </View>
+      {newRecord && <Text style={ws.recordNote}>Personal best saved!</Text>}
+      <Pressable style={ws.mainBtn} onPress={onPlayAgain}>
+        <Text style={ws.mainBtnText}>PLAY AGAIN  ▶</Text>
+      </Pressable>
+      <Pressable style={ws.secBtn} onPress={onChangeLevel}>
+        <Text style={ws.secBtnText}>CHANGE LEVEL</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function MazeScreen() {
   const [sizeIndex, setSizeIndex] = useState(1);
   const [showHint, setShowHint] = useState(false);
-  const [bestScores, setBestScores] = useState<Record<string, BestScore>>({});
+  const [bests, setBests] = useState<Record<string, BestScore>>({});
   const [newRecord, setNewRecord] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const screenWidth = Dimensions.get("window").width;
-  const mazeSize = Math.min(screenWidth - 32, 380);
+  const { width } = Dimensions.get("window");
+  const mazeSize = Math.min(width - 24, 370);
 
   const [state, dispatch] = useReducer(reducer, {
-    maze: [],
-    playerRow: 0,
-    playerCol: 0,
-    moves: 0,
-    timeSeconds: 0,
-    status: "idle",
-    cols: 15,
-    rows: 15,
+    maze: [], playerRow: 0, playerCol: 0, moves: 0, timeSeconds: 0, status: "idle", cols: 15, rows: 15,
   });
-
-  // Keep a ref to current state for the swipe + move handlers
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
-  useEffect(() => { loadBestScores().then(setBestScores); }, []);
+  useEffect(() => { loadBests().then(setBests); }, []);
 
   const startGame = useCallback((idx: number) => {
-    const { rows, cols } = MAZE_SIZES[idx];
-    const maze = generateMaze(rows, cols);
-    dispatch({ type: "INIT_MAZE", maze, rows, cols });
-    setShowHint(false);
-    setNewRecord(false);
-    haptic("medium");
+    const { rows, cols } = LEVELS[idx];
+    dispatch({ type: "INIT_MAZE", maze: generateMaze(rows, cols), rows, cols });
+    setShowHint(false); setNewRecord(false); haptic("medium");
   }, []);
 
   const move = useCallback((dr: number, dc: number) => {
     const s = stateRef.current;
     if (s.status !== "playing") return;
-    const { playerRow: r, playerCol: c, maze } = s;
-    const cell = maze[r][c];
-    const blocked =
-      (dr === -1 && cell.walls.top) ||
-      (dr === 1 && cell.walls.bottom) ||
-      (dc === 1 && cell.walls.right) ||
-      (dc === -1 && cell.walls.left);
-    if (blocked) haptic("error");
-    else haptic("light");
+    const cell = s.maze[s.playerRow][s.playerCol];
+    const blocked = (dr === -1 && cell.walls.top) || (dr === 1 && cell.walls.bottom) ||
+      (dc === 1 && cell.walls.right) || (dc === -1 && cell.walls.left);
+    if (blocked) haptic("error"); else haptic("light");
     dispatch({ type: "MOVE", dr, dc });
   }, []);
 
   useEffect(() => {
-    if (state.status === "playing") {
-      timerRef.current = setInterval(() => dispatch({ type: "TICK" }), 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-    }
+    if (state.status === "playing") { timerRef.current = setInterval(() => dispatch({ type: "TICK" }), 1000); }
+    else if (timerRef.current) { clearInterval(timerRef.current); }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state.status]);
 
   useEffect(() => {
     if (state.status === "won") {
       haptic("success");
-      const key = `${state.rows}x${state.cols}`;
-      saveBestScore(key, state.timeSeconds, state.moves, bestScores).then(
-        ({ updated, isNew }) => { setBestScores(updated); setNewRecord(isNew); }
-      );
+      saveBest(`${state.rows}x${state.cols}`, state.timeSeconds, state.moves, bests)
+        .then(({ updated, isNew }) => { setBests(updated); setNewRecord(isNew); });
     }
   }, [state.status]);
 
-  // Swipe gesture
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
-      onPanResponderRelease: (_, g) => {
-        const THRESHOLD = 18;
-        const { dx, dy } = g;
-        if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
-        if (Math.abs(dx) > Math.abs(dy)) {
-          if (dx > 0) dispatch({ type: "MOVE", dr: 0, dc: 1 });
-          else dispatch({ type: "MOVE", dr: 0, dc: -1 });
-        } else {
-          if (dy > 0) dispatch({ type: "MOVE", dr: 1, dc: 0 });
-          else dispatch({ type: "MOVE", dr: -1, dc: 0 });
-        }
-        haptic("light");
-      },
-    })
-  ).current;
+  const panResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
+    onPanResponderRelease: (_, g) => {
+      const THR = 18;
+      if (Math.abs(g.dx) < THR && Math.abs(g.dy) < THR) return;
+      if (Math.abs(g.dx) > Math.abs(g.dy)) {
+        dispatch({ type: "MOVE", dr: 0, dc: g.dx > 0 ? 1 : -1 });
+      } else {
+        dispatch({ type: "MOVE", dr: g.dy > 0 ? 1 : -1, dc: 0 });
+      }
+      haptic("light");
+    },
+  })).current;
 
-  const hintPath = useMemo(
-    () =>
-      showHint && state.maze.length > 0
-        ? findPath(state.maze, state.rows, state.cols, state.playerRow, state.playerCol)
-        : new Set<string>(),
+  const hintPath = useMemo(() =>
+    showHint && state.maze.length > 0
+      ? findPath(state.maze, state.rows, state.cols, state.playerRow, state.playerCol)
+      : new Set<string>(),
     [showHint, state.maze, state.rows, state.cols, state.playerRow, state.playerCol]
   );
 
-  const currentKey = `${state.rows}x${state.cols}`;
-  const best = bestScores[currentKey];
-  const idleKey = `${MAZE_SIZES[sizeIndex].rows}x${MAZE_SIZES[sizeIndex].cols}`;
-  const idleBest = bestScores[idleKey];
-  const hasAnyBest = Object.keys(bestScores).length > 0;
+  const currentBest = bests[`${state.rows}x${state.cols}`];
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        scrollEnabled={state.status !== "playing"}
-      >
-        <Text style={styles.title}>Maze Game</Text>
-        <Text style={styles.subtitle}>
-          Navigate from{" "}
-          <Text style={{ color: "#34d399", fontWeight: "bold" }}>S</Text> to{" "}
-          <Text style={{ color: "#fbbf24", fontWeight: "bold" }}>G</Text>
-        </Text>
-
-        {state.status !== "idle" && (
-          <View style={styles.statsBar}>
-            <View style={styles.statChip}>
-              <Text style={styles.statLabel}>Time</Text>
-              <Text style={styles.statValue}>{formatTime(state.timeSeconds)}</Text>
-              {best && <Text style={styles.statBest}>best {formatTime(best.time)}</Text>}
-            </View>
-            <View style={styles.statChip}>
-              <Text style={styles.statLabel}>Moves</Text>
-              <Text style={styles.statValue}>{state.moves}</Text>
-              {best && <Text style={styles.statBest}>best {best.moves}</Text>}
-            </View>
-          </View>
-        )}
-
-        {state.status === "idle" && (
-          <View style={styles.sizeSelector}>
-            {MAZE_SIZES.map((s, i) => {
-              const bk = `${s.rows}x${s.cols}`;
-              const b = bestScores[bk];
-              const isGod = i === 5;
-              return (
-                <Pressable
-                  key={i}
-                  style={[
-                    styles.sizeBtn,
-                    sizeIndex === i && (isGod ? styles.sizeBtnGodActive : styles.sizeBtnActive),
-                    isGod && styles.sizeBtnGod,
-                  ]}
-                  onPress={() => setSizeIndex(i)}
-                >
-                  <Text style={[styles.sizeBtnText, sizeIndex === i && (isGod ? styles.sizeBtnGodText : styles.sizeBtnTextActive)]}>
-                    {s.label}
-                  </Text>
-                  <Text style={[styles.sizeBtnSub, sizeIndex === i && styles.sizeBtnSubActive]}>{s.sub}</Text>
-                  {b && <Text style={styles.sizeBtnBest}>{formatTime(b.time)} / {b.moves}m</Text>}
-                </Pressable>
-              );
-            })}
-          </View>
-        )}
-
-        <View
-          style={[styles.mazeContainer, { width: mazeSize, height: mazeSize }]}
-          {...(state.status === "playing" ? panResponder.panHandlers : {})}
-        >
-          {state.maze.length > 0 && (
-            <MazeCanvas
-              maze={state.maze}
-              rows={state.rows}
-              cols={state.cols}
-              playerRow={state.playerRow}
-              playerCol={state.playerCol}
-              hintPath={hintPath}
-              size={mazeSize}
-            />
-          )}
-
-          {state.status === "idle" && (
-            <View style={styles.overlay}>
-              <Text style={styles.overlayTitle}>Ready to play?</Text>
-              <Text style={styles.overlaySubtitle}>{MAZE_SIZES[sizeIndex].label} — {MAZE_SIZES[sizeIndex].sub}</Text>
-              {idleBest && <Text style={styles.overlayBest}>Best: {formatTime(idleBest.time)} in {idleBest.moves} moves</Text>}
-              <Pressable style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]} onPress={() => startGame(sizeIndex)}>
-                <Text style={styles.startBtnText}>Start Game</Text>
-              </Pressable>
-            </View>
-          )}
-
-          {state.status === "won" && (
-            <View style={styles.overlay}>
-              <Text style={styles.winEmoji}>{newRecord ? "🏆" : "🎉"}</Text>
-              <Text style={styles.winTitle}>{newRecord ? "New Record!" : "Level Complete!"}</Text>
-              <View style={styles.winStats}>
-                <View style={styles.winStatItem}>
-                  <Text style={styles.winStatLabel}>Time</Text>
-                  <Text style={styles.winStatValue}>{formatTime(state.timeSeconds)}</Text>
-                  {best && !newRecord && <Text style={styles.winStatBest}>best {formatTime(best.time)}</Text>}
-                </View>
-                <View style={styles.winStatItem}>
-                  <Text style={styles.winStatLabel}>Moves</Text>
-                  <Text style={styles.winStatValue}>{state.moves}</Text>
-                  {best && !newRecord && <Text style={styles.winStatBest}>best {best.moves}</Text>}
-                </View>
-              </View>
-              {newRecord && <Text style={styles.recordLabel}>Personal best saved!</Text>}
-              <View style={styles.winBtnRow}>
-                <Pressable style={({ pressed }) => [styles.startBtn, pressed && styles.startBtnPressed]} onPress={() => startGame(sizeIndex)}>
-                  <Text style={styles.startBtnText}>Play Again</Text>
-                </Pressable>
-                <Pressable style={({ pressed }) => [styles.secondaryBtn, pressed && styles.secondaryBtnPressed]} onPress={() => dispatch({ type: "RESET" })}>
-                  <Text style={styles.secondaryBtnText}>Change Level</Text>
-                </Pressable>
-              </View>
-            </View>
-          )}
-        </View>
-
-        {state.status === "playing" && (
-          <View style={styles.controls}>
-            <Text style={styles.swipeHint}>Swipe or hold D-pad to move continuously</Text>
-            <View style={styles.hintRow}>
-              <Pressable
-                style={({ pressed }) => [styles.hintBtn, showHint && styles.hintBtnActive, pressed && styles.btnPressed]}
-                onPress={() => { setShowHint((v) => !v); haptic("light"); }}
-              >
-                <Text style={[styles.hintBtnText, showHint && styles.hintBtnTextActive]}>
-                  {showHint ? "Hide Hint" : "💡 Hint"}
-                </Text>
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [styles.resetBtn, pressed && styles.btnPressed]}
-                onPress={() => startGame(sizeIndex)}
-              >
-                <Text style={styles.resetBtnText}>New Maze</Text>
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [styles.resetBtn, pressed && styles.btnPressed]}
-                onPress={() => dispatch({ type: "RESET" })}
-              >
-                <Text style={styles.resetBtnText}>Change Level</Text>
-              </Pressable>
-            </View>
-            <DPad onMove={move} />
-          </View>
-        )}
-
-        {hasAnyBest && state.status === "idle" && (
-          <View style={styles.bestTable}>
-            <Text style={styles.bestTableTitle}>Your Best Scores</Text>
-            <View style={styles.bestTableContainer}>
-              <View style={styles.bestTableHeader}>
-                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { flex: 1.5 }]}>Level</Text>
-                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { textAlign: "right" }]}>Best Time</Text>
-                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { textAlign: "right" }]}>Best Moves</Text>
-              </View>
-              {MAZE_SIZES.map((s, i) => {
-                const b = bestScores[`${s.rows}x${s.cols}`];
-                if (!b) return null;
-                return (
-                  <View key={i} style={styles.bestTableRow}>
-                    <View style={{ flex: 1.5 }}>
-                      <Text style={styles.bestTableLevel}>{s.label}</Text>
-                      <Text style={styles.bestTableSub}>{s.sub}</Text>
-                    </View>
-                    <Text style={[styles.bestTableCell, styles.bestTimeText, { textAlign: "right" }]}>{formatTime(b.time)}</Text>
-                    <Text style={[styles.bestTableCell, styles.bestMovesText, { textAlign: "right" }]}>{b.moves}</Text>
-                  </View>
-                );
-              })}
-            </View>
-          </View>
-        )}
-      </ScrollView>
+    <SafeAreaView style={{ flex: 1, backgroundColor: T.bg }} edges={["top"]}>
+      <Header />
+      {state.status === "idle" && (
+        <IdleScreen sizeIndex={sizeIndex} setSizeIndex={setSizeIndex} onStart={startGame} bestScores={bests} />
+      )}
+      {state.status === "playing" && (
+        <GameScreen
+          state={state} dispatch={dispatch} showHint={showHint} setShowHint={setShowHint}
+          onNewMaze={() => startGame(sizeIndex)} onDifficulty={() => dispatch({ type: "RESET" })}
+          move={move} mazeSize={mazeSize} hintPath={hintPath}
+          panHandlers={panResponder.panHandlers}
+        />
+      )}
+      {state.status === "won" && (
+        <WinScreen
+          state={state} newRecord={newRecord} best={currentBest}
+          onPlayAgain={() => startGame(sizeIndex)}
+          onChangeLevel={() => dispatch({ type: "RESET" })}
+        />
+      )}
     </SafeAreaView>
   );
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
-const DPAD_BTN = 66;
-const DPAD_GAP = 6;
+const s = StyleSheet.create({
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: T.border },
+  headerIcon: { width: 32, height: 32, borderRadius: 8, backgroundColor: T.cyanDim, borderWidth: 1, borderColor: T.cyan, alignItems: "center", justifyContent: "center", marginRight: 10 },
+  headerTitle: { fontSize: 18, fontWeight: "800", color: T.purple, letterSpacing: 3 },
+  headerGear: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
+});
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0f1117" },
-  scroll: { alignItems: "center", paddingHorizontal: 16, paddingBottom: 40, paddingTop: 12 },
-  title: { fontSize: 28, fontWeight: "bold", color: "#818cf8", marginBottom: 4, letterSpacing: -0.5 },
-  subtitle: { fontSize: 14, color: "#64748b", marginBottom: 12 },
-  statsBar: { flexDirection: "row", gap: 12, marginBottom: 12, flexWrap: "wrap", justifyContent: "center" },
-  statChip: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(255,255,255,0.06)", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
-  statLabel: { color: "#64748b", fontSize: 13 },
-  statValue: { color: "#fff", fontSize: 16, fontWeight: "bold" },
-  statBest: { color: "#475569", fontSize: 11, marginLeft: 4 },
-  sizeSelector: { flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "center", marginBottom: 14 },
-  sizeBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.04)", alignItems: "center", minWidth: 70 },
-  sizeBtnActive: { backgroundColor: "#4f46e5", borderColor: "#818cf8" },
-  sizeBtnGod: { borderColor: "rgba(234,179,8,0.4)", backgroundColor: "rgba(234,179,8,0.05)" },
-  sizeBtnGodActive: { backgroundColor: "#ca8a04", borderColor: "#fbbf24" },
-  sizeBtnText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
-  sizeBtnTextActive: { color: "#fff" },
-  sizeBtnGodText: { color: "#fbbf24" },
-  sizeBtnSub: { color: "#475569", fontSize: 11, marginTop: 1 },
-  sizeBtnSubActive: { color: "rgba(255,255,255,0.7)" },
-  sizeBtnBest: { color: "#374151", fontSize: 9, marginTop: 2 },
-  mazeContainer: { borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,17,23,0.93)", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 12 },
-  overlayTitle: { color: "#a5b4fc", fontSize: 22, fontWeight: "bold" },
-  overlaySubtitle: { color: "#94a3b8", fontSize: 14 },
-  overlayBest: { color: "#475569", fontSize: 12, marginTop: -4 },
-  startBtn: { backgroundColor: "#4f46e5", paddingHorizontal: 28, paddingVertical: 13, borderRadius: 13, marginTop: 4 },
-  startBtnPressed: { backgroundColor: "#4338ca" },
-  startBtnText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
-  secondaryBtn: { backgroundColor: "rgba(255,255,255,0.08)", paddingHorizontal: 20, paddingVertical: 13, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)" },
-  secondaryBtnPressed: { backgroundColor: "rgba(255,255,255,0.14)" },
-  secondaryBtnText: { color: "#94a3b8", fontSize: 15, fontWeight: "600" },
-  winEmoji: { fontSize: 44 },
-  winTitle: { color: "#fbbf24", fontSize: 24, fontWeight: "bold" },
-  winStats: { flexDirection: "row", gap: 32 },
-  winStatItem: { alignItems: "center" },
-  winStatLabel: { color: "#64748b", fontSize: 13 },
-  winStatValue: { color: "#fff", fontSize: 22, fontWeight: "bold" },
-  winStatBest: { color: "#374151", fontSize: 11, marginTop: 1 },
-  recordLabel: { color: "rgba(234,179,8,0.6)", fontSize: 12 },
-  winBtnRow: { flexDirection: "row", gap: 10, marginTop: 4 },
-  controls: { alignItems: "center", marginTop: 14, gap: 10, width: "100%" },
-  swipeHint: { color: "#374151", fontSize: 12, textAlign: "center" },
-  hintRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", justifyContent: "center" },
-  hintBtn: { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" },
-  hintBtnActive: { backgroundColor: "rgba(6,182,212,0.15)", borderColor: "rgba(6,182,212,0.5)" },
-  hintBtnText: { color: "#94a3b8", fontSize: 14, fontWeight: "600" },
-  hintBtnTextActive: { color: "#22d3ee" },
-  resetBtn: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" },
-  resetBtnText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
-  btnPressed: { opacity: 0.65 },
-  dpadContainer: { alignItems: "center", gap: DPAD_GAP },
-  dpadRow: { flexDirection: "row", alignItems: "center", gap: DPAD_GAP },
-  dpadSpacer: { width: DPAD_BTN, height: DPAD_BTN },
-  dpadBtn: { width: DPAD_BTN, height: DPAD_BTN, borderRadius: 18, backgroundColor: "#1a1f33", borderWidth: 1.5, borderColor: "#2a3050", alignItems: "center", justifyContent: "center" },
-  dpadBtnPressed: { backgroundColor: "#3730a3", borderColor: "#818cf8" },
-  dpadArrow: { color: "rgba(255,255,255,0.75)", fontSize: 22 },
-  dpadArrowPressed: { color: "#fff" },
-  dpadCenter: { width: DPAD_BTN, height: DPAD_BTN, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.02)", borderWidth: 1, borderColor: "#1a1f2e" },
-  bestTable: { marginTop: 20, width: "100%", maxWidth: 380 },
-  bestTableTitle: { color: "#475569", fontSize: 11, fontWeight: "600", textAlign: "center", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 },
-  bestTableContainer: { borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", overflow: "hidden" },
-  bestTableHeader: { flexDirection: "row", backgroundColor: "rgba(255,255,255,0.04)", paddingVertical: 8, paddingHorizontal: 12 },
-  bestTableHeaderText: { color: "#475569", fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 },
-  bestTableRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.05)" },
-  bestTableCell: { flex: 1, fontSize: 14 },
-  bestTableLevel: { color: "#cbd5e1", fontSize: 14, fontWeight: "600" },
-  bestTableSub: { color: "#475569", fontSize: 11 },
-  bestTimeText: { color: "#818cf8", fontWeight: "600" },
-  bestMovesText: { color: "#22d3ee", fontWeight: "600" },
+const idle = StyleSheet.create({
+  scroll: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 32, gap: 10 },
+  badge: { alignSelf: "center", borderWidth: 1, borderColor: T.cyan, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 5, backgroundColor: T.cyanDim, marginBottom: 4 },
+  badgeText: { color: T.cyan, fontSize: 10, fontWeight: "700", letterSpacing: 2 },
+  title: { fontSize: 38, fontWeight: "900", color: T.text, letterSpacing: 1, textAlign: "center", lineHeight: 44 },
+  subtitle: { fontSize: 11, fontWeight: "600", color: T.textMuted, letterSpacing: 2, textAlign: "center", marginBottom: 4 },
+  card: { backgroundColor: T.card, borderRadius: 12, borderWidth: 1, borderColor: T.border, borderLeftWidth: 3, padding: 14, flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  cardSelected: { borderColor: T.borderBright, backgroundColor: T.cardAlt },
+  cardLvl: { fontSize: 10, fontWeight: "700", letterSpacing: 1.5, marginBottom: 3 },
+  cardName: { fontSize: 18, fontWeight: "800", color: T.text, marginBottom: 3 },
+  cardDesc: { fontSize: 11, color: T.textMuted, lineHeight: 16 },
+  cardBest: { fontSize: 10, color: T.textDim, marginTop: 4, fontWeight: "600" },
+  cardBar: { width: 32, height: 3, borderRadius: 2, marginTop: 4 },
+  godCard: { backgroundColor: T.surface, borderRadius: 14, borderWidth: 1, borderColor: T.borderBright, padding: 18, alignItems: "center", gap: 6 },
+  godCardSelected: { borderColor: T.cyan, backgroundColor: T.cyanDim },
+  godHeader: { fontSize: 10, fontWeight: "700", color: T.cyan, letterSpacing: 2 },
+  godTitle: { fontSize: 28, fontWeight: "900", color: T.text, letterSpacing: 2 },
+  godDesc: { fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 18 },
+  godStars: { color: T.cyan, fontSize: 18, letterSpacing: 6, marginTop: 4 },
+  startBtn: { backgroundColor: T.purple, borderRadius: 30, paddingVertical: 16, alignItems: "center", marginTop: 6, borderWidth: 1, borderColor: "#A78BFA" },
+  startBtnText: { color: "#fff", fontSize: 15, fontWeight: "800", letterSpacing: 2 },
+  statusText: { textAlign: "center", color: T.textDim, fontSize: 9, letterSpacing: 1.5, fontWeight: "600", marginTop: 4 },
+});
+
+const gs = StyleSheet.create({
+  statsRow: { flexDirection: "row", marginHorizontal: 16, marginVertical: 10, backgroundColor: T.surface, borderRadius: 14, borderWidth: 1, borderColor: T.border, overflow: "hidden" },
+  statCard: { flex: 1, paddingVertical: 12, alignItems: "center" },
+  statDivider: { width: 1, backgroundColor: T.border, marginVertical: 10 },
+  statLabel: { fontSize: 9, fontWeight: "700", color: T.textMuted, letterSpacing: 2, marginBottom: 2 },
+  statValue: { fontSize: 24, fontWeight: "800", color: T.cyan, letterSpacing: 1 },
+  mazeWrap: { borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: T.borderBright, marginHorizontal: 12 },
+  controlsRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 12, gap: 14, flex: 1 },
+  actionBtns: { flex: 1, gap: 8 },
+});
+
+const dp = StyleSheet.create({
+  wrap: { alignItems: "center" },
+  card: { backgroundColor: T.surface, borderRadius: 16, borderWidth: 1, borderColor: T.border, padding: 6, gap: 4 },
+  row: { flexDirection: "row", gap: 4, alignItems: "center" },
+  btn: { width: 56, height: 56, borderRadius: 12, backgroundColor: T.card, borderWidth: 1, borderColor: T.borderBright, alignItems: "center", justifyContent: "center" },
+  btnActive: { backgroundColor: T.cyanDim, borderColor: T.cyan },
+  corner: { width: 56, height: 56 },
+  center: { width: 56, height: 56, alignItems: "center", justifyContent: "center" },
+  centerDot: { width: 32, height: 32, borderRadius: 16, backgroundColor: T.green, borderWidth: 2, borderColor: "#6EE7B7" },
+});
+
+const ab = StyleSheet.create({
+  btn: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: T.border, backgroundColor: T.card },
+  btnActive: { borderColor: T.cyan, backgroundColor: T.cyanDim },
+  label: { fontSize: 11, fontWeight: "700", color: T.textMuted, letterSpacing: 1 },
+  labelActive: { color: T.cyan },
+});
+
+const ws = StyleSheet.create({
+  scroll: { flex: 1, paddingHorizontal: 24, paddingTop: 24, paddingBottom: 40, alignItems: "center", gap: 14 },
+  badge: { borderWidth: 1, borderColor: T.cyan, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 5, backgroundColor: T.cyanDim },
+  badgeText: { color: T.cyan, fontSize: 10, fontWeight: "700", letterSpacing: 2 },
+  emoji: { fontSize: 56, marginTop: 8 },
+  title: { fontSize: 36, fontWeight: "900", color: T.text, letterSpacing: 1, textAlign: "center", lineHeight: 42 },
+  statsRow: { flexDirection: "row", backgroundColor: T.surface, borderRadius: 14, borderWidth: 1, borderColor: T.border, overflow: "hidden", width: "100%" },
+  stat: { flex: 1, paddingVertical: 16, alignItems: "center" },
+  statDivider: { width: 1, backgroundColor: T.border, marginVertical: 10 },
+  statLabel: { fontSize: 9, fontWeight: "700", color: T.textMuted, letterSpacing: 2, marginBottom: 4 },
+  statValue: { fontSize: 28, fontWeight: "800", color: T.cyan, letterSpacing: 1 },
+  statBest: { fontSize: 10, color: T.textDim, marginTop: 3 },
+  recordNote: { color: T.cyan, fontSize: 12, fontWeight: "600", opacity: 0.7 },
+  mainBtn: { backgroundColor: T.purple, borderRadius: 30, paddingVertical: 16, alignItems: "center", width: "100%", borderWidth: 1, borderColor: "#A78BFA" },
+  mainBtnText: { color: "#fff", fontSize: 15, fontWeight: "800", letterSpacing: 2 },
+  secBtn: { backgroundColor: T.card, borderRadius: 14, paddingVertical: 12, alignItems: "center", width: "100%", borderWidth: 1, borderColor: T.border },
+  secBtnText: { color: T.textMuted, fontSize: 13, fontWeight: "700", letterSpacing: 1 },
 });
