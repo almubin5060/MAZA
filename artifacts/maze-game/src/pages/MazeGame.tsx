@@ -1,5 +1,23 @@
 import { useEffect, useRef, useCallback, useReducer, useState } from "react";
 
+// ─── Touch Detection Hook ─────────────────────────────────────────────────────
+
+function useIsTouchDevice(): boolean {
+  const [isTouch, setIsTouch] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(pointer: coarse)").matches;
+  });
+
+  useEffect(() => {
+    const mq = window.matchMedia("(pointer: coarse)");
+    const handler = (e: MediaQueryListEvent) => setIsTouch(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  return isTouch;
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Cell {
@@ -204,6 +222,7 @@ export default function MazeGame() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sizeIndex, setSizeIndex] = useReducer((_: number, v: number) => v, 1);
   const [showHint, setShowHint] = useState(false);
+  const isTouchDevice = useIsTouchDevice();
 
   const [state, dispatch] = useReducer(reducer, {
     maze: [],
@@ -557,35 +576,60 @@ export default function MazeGame() {
       {/* Controls (shown while playing) */}
       {state.status === "playing" && (
         <div className="mt-5 flex flex-col items-center gap-3">
-          {/* D-pad for mobile / touch */}
-          <div className="flex flex-col items-center gap-1 sm:hidden">
-            <button
-              onPointerDown={() => dispatch({ type: "MOVE", dr: -1, dc: 0 })}
-              className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-lg flex items-center justify-center text-white text-xl font-bold active:bg-white/30"
-            >
-              ▲
-            </button>
-            <div className="flex gap-1">
-              <button
-                onPointerDown={() => dispatch({ type: "MOVE", dr: 0, dc: -1 })}
-                className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-lg flex items-center justify-center text-white text-xl font-bold active:bg-white/30"
+          {/* D-pad — only shown on touch/mobile devices */}
+          {isTouchDevice && (
+            <div className="mt-1 mb-1 select-none" style={{ touchAction: "none" }}>
+              {/* 3×3 grid layout: empty / up / empty | left / center / right | empty / down / empty */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 68px)",
+                  gridTemplateRows: "repeat(3, 68px)",
+                  gap: "4px",
+                }}
               >
-                ◄
-              </button>
-              <button
-                onPointerDown={() => dispatch({ type: "MOVE", dr: 1, dc: 0 })}
-                className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-lg flex items-center justify-center text-white text-xl font-bold active:bg-white/30"
-              >
-                ▼
-              </button>
-              <button
-                onPointerDown={() => dispatch({ type: "MOVE", dr: 0, dc: 1 })}
-                className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-lg flex items-center justify-center text-white text-xl font-bold active:bg-white/30"
-              >
-                ►
-              </button>
+                {/* Row 1 */}
+                <div />
+                <button
+                  onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: -1, dc: 0 }); }}
+                  style={{ WebkitTapHighlightColor: "transparent" }}
+                  className="rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center active:bg-indigo-500/60 active:border-indigo-400 transition-colors shadow-md"
+                >
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M12 5l8 8H4z"/></svg>
+                </button>
+                <div />
+
+                {/* Row 2 */}
+                <button
+                  onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 0, dc: -1 }); }}
+                  style={{ WebkitTapHighlightColor: "transparent" }}
+                  className="rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center active:bg-indigo-500/60 active:border-indigo-400 transition-colors shadow-md"
+                >
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M5 12l8-8v16z"/></svg>
+                </button>
+                {/* Center inert piece */}
+                <div className="rounded-2xl bg-white/5 border border-white/10 shadow-inner" />
+                <button
+                  onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 0, dc: 1 }); }}
+                  style={{ WebkitTapHighlightColor: "transparent" }}
+                  className="rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center active:bg-indigo-500/60 active:border-indigo-400 transition-colors shadow-md"
+                >
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M19 12l-8 8V4z"/></svg>
+                </button>
+
+                {/* Row 3 */}
+                <div />
+                <button
+                  onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 1, dc: 0 }); }}
+                  style={{ WebkitTapHighlightColor: "transparent" }}
+                  className="rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center active:bg-indigo-500/60 active:border-indigo-400 transition-colors shadow-md"
+                >
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M12 19l8-8H4z"/></svg>
+                </button>
+                <div />
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="flex flex-wrap gap-2 justify-center max-w-lg">
             <button
