@@ -7,17 +7,18 @@ import React, {
 } from "react";
 import {
   Dimensions,
+  PanResponder,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Rect, Text as SvgText } from "react-native-svg";
-import Colors from "@/constants/colors";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,11 @@ type Action =
   | { type: "MOVE"; dr: number; dc: number }
   | { type: "TICK" }
   | { type: "RESET" };
+
+interface BestScore {
+  time: number;
+  moves: number;
+}
 
 // ─── Maze Generation ─────────────────────────────────────────────────────────
 
@@ -85,13 +91,7 @@ function generateMaze(rows: number, cols: number): Cell[][] {
     const neighbors = shuffle(directions).filter(({ dr, dc }) => {
       const nr = r + dr;
       const nc = c + dc;
-      return (
-        nr >= 0 &&
-        nr < rows &&
-        nc >= 0 &&
-        nc < cols &&
-        !grid[nr][nc].visited
-      );
+      return nr >= 0 && nr < rows && nc >= 0 && nc < cols && !grid[nr][nc].visited;
     });
 
     if (neighbors.length === 0) {
@@ -143,10 +143,8 @@ function findPath(
       const nc = c + dc;
       const key = `${nr},${nc}`;
       if (
-        nr >= 0 &&
-        nr < rows &&
-        nc >= 0 &&
-        nc < cols &&
+        nr >= 0 && nr < rows &&
+        nc >= 0 && nc < cols &&
         !cell.walls[wall] &&
         !visited.has(key)
       ) {
@@ -188,8 +186,7 @@ function reducer(state: GameState, action: Action): GameState {
       if (wallBlocked) return state;
       const nr = r + dr;
       const nc = c + dc;
-      if (nr < 0 || nr >= state.rows || nc < 0 || nc >= state.cols)
-        return state;
+      if (nr < 0 || nr >= state.rows || nc < 0 || nc >= state.cols) return state;
       const won = nr === state.rows - 1 && nc === state.cols - 1;
       return {
         ...state,
@@ -204,9 +201,49 @@ function reducer(state: GameState, action: Action): GameState {
       if (state.status !== "playing") return state;
       return { ...state, timeSeconds: state.timeSeconds + 1 };
 
+    case "RESET":
+      return {
+        ...state,
+        maze: [],
+        playerRow: 0,
+        playerCol: 0,
+        moves: 0,
+        timeSeconds: 0,
+        status: "idle",
+      };
+
     default:
       return state;
   }
+}
+
+// ─── Best Score Helpers ───────────────────────────────────────────────────────
+
+const STORAGE_KEY = "@maze_best_scores";
+
+async function loadBestScores(): Promise<Record<string, BestScore>> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveBestScore(
+  key: string,
+  time: number,
+  moves: number,
+  current: Record<string, BestScore>
+): Promise<{ updated: Record<string, BestScore>; isNew: boolean }> {
+  const prev = current[key];
+  const isNew = !prev || time < prev.time || (time === prev.time && moves < prev.moves);
+  if (!isNew) return { updated: current, isNew: false };
+  const updated = { ...current, [key]: { time, moves } };
+  try {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  } catch {}
+  return { updated, isNew: true };
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -216,6 +253,8 @@ const MAZE_SIZES = [
   { label: "Medium", sub: "15×15", rows: 15, cols: 15 },
   { label: "Hard", sub: "20×20", rows: 20, cols: 20 },
   { label: "Harder", sub: "30×30", rows: 30, cols: 30 },
+  { label: "Hardest", sub: "40×40", rows: 40, cols: 40 },
+  { label: "GOD", sub: "50×50", rows: 50, cols: 50 },
 ];
 
 const formatTime = (s: number) => {
@@ -223,6 +262,16 @@ const formatTime = (s: number) => {
   const sec = s % 60;
   return `${m}:${sec.toString().padStart(2, "0")}`;
 };
+
+function haptic(type: "light" | "medium" | "success" | "error") {
+  if (Platform.OS === "web") return;
+  try {
+    if (type === "light") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    else if (type === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    else if (type === "success") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    else if (type === "error") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+  } catch {}
+}
 
 // ─── Maze SVG Renderer ───────────────────────────────────────────────────────
 
@@ -236,15 +285,7 @@ interface MazeSvgProps {
   size: number;
 }
 
-function MazeSvg({
-  maze,
-  rows,
-  cols,
-  playerRow,
-  playerCol,
-  hintPath,
-  size,
-}: MazeSvgProps) {
+function MazeSvg({ maze, rows, cols, playerRow, playerCol, hintPath, size }: MazeSvgProps) {
   const cellSize = Math.floor(size / Math.max(rows, cols));
   const totalW = cellSize * cols;
   const totalH = cellSize * rows;
@@ -267,115 +308,33 @@ function MazeSvg({
 
       if (isStart) {
         cellRects.push(
-          <Rect
-            key={`start-${r}-${c}`}
-            x={x + 1}
-            y={y + 1}
-            width={cellSize - 1}
-            height={cellSize - 1}
-            fill="rgba(34,211,153,0.25)"
-          />
+          <Rect key={`s-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(34,211,153,0.25)" />
         );
       } else if (isGoal) {
         cellRects.push(
-          <Rect
-            key={`goal-${r}-${c}`}
-            x={x + 1}
-            y={y + 1}
-            width={cellSize - 1}
-            height={cellSize - 1}
-            fill="rgba(251,191,36,0.25)"
-          />
+          <Rect key={`g-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(251,191,36,0.25)" />
         );
       } else if (onPath) {
         cellRects.push(
-          <Rect
-            key={`hint-${r}-${c}`}
-            x={x + 1}
-            y={y + 1}
-            width={cellSize - 1}
-            height={cellSize - 1}
-            fill="rgba(6,182,212,0.18)"
-          />
+          <Rect key={`h-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="rgba(6,182,212,0.18)" />
         );
         if (!isPlayer) {
           const dotR = Math.max(1.5, cellSize * 0.14);
           hintDots.push(
-            <Circle
-              key={`dot-${r}-${c}`}
-              cx={x + cellSize / 2}
-              cy={y + cellSize / 2}
-              r={dotR}
-              fill="rgba(34,211,238,0.65)"
-            />
+            <Circle key={`d-${r}-${c}`} cx={x + cellSize / 2} cy={y + cellSize / 2} r={dotR} fill="rgba(34,211,238,0.65)" />
           );
         }
       } else {
         cellRects.push(
-          <Rect
-            key={`cell-${r}-${c}`}
-            x={x + 1}
-            y={y + 1}
-            width={cellSize - 1}
-            height={cellSize - 1}
-            fill="#1e2030"
-          />
+          <Rect key={`c-${r}-${c}`} x={x + 1} y={y + 1} width={cellSize - 1} height={cellSize - 1} fill="#1e2030" />
         );
       }
 
       const { walls } = maze[r][c];
-      if (walls.top) {
-        wallLines.push(
-          <Line
-            key={`wt-${r}-${c}`}
-            x1={x}
-            y1={y}
-            x2={x + cellSize}
-            y2={y}
-            stroke="#5b6082"
-            strokeWidth={1.5}
-          />
-        );
-      }
-      if (walls.right) {
-        wallLines.push(
-          <Line
-            key={`wr-${r}-${c}`}
-            x1={x + cellSize}
-            y1={y}
-            x2={x + cellSize}
-            y2={y + cellSize}
-            stroke="#5b6082"
-            strokeWidth={1.5}
-          />
-        );
-      }
-      if (walls.bottom) {
-        wallLines.push(
-          <Line
-            key={`wb-${r}-${c}`}
-            x1={x}
-            y1={y + cellSize}
-            x2={x + cellSize}
-            y2={y + cellSize}
-            stroke="#5b6082"
-            strokeWidth={1.5}
-          />
-        );
-      }
-      if (walls.left) {
-        wallLines.push(
-          <Line
-            key={`wl-${r}-${c}`}
-            x1={x}
-            y1={y}
-            x2={x}
-            y2={y + cellSize}
-            stroke="#5b6082"
-            strokeWidth={1.5}
-          />
-        );
-      }
+      if (walls.top) wallLines.push(<Line key={`wt-${r}-${c}`} x1={x} y1={y} x2={x + cellSize} y2={y} stroke="#5b6082" strokeWidth={1.5} />);
+      if (walls.right) wallLines.push(<Line key={`wr-${r}-${c}`} x1={x + cellSize} y1={y} x2={x + cellSize} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
+      if (walls.bottom) wallLines.push(<Line key={`wb-${r}-${c}`} x1={x} y1={y + cellSize} x2={x + cellSize} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
+      if (walls.left) wallLines.push(<Line key={`wl-${r}-${c}`} x1={x} y1={y} x2={x} y2={y + cellSize} stroke="#5b6082" strokeWidth={1.5} />);
     }
   }
 
@@ -390,57 +349,24 @@ function MazeSvg({
       {cellRects}
       {wallLines}
       {hintDots}
-      <SvgText
-        x={offX + cellSize / 2}
-        y={offY + cellSize / 2 + fontSize * 0.36}
-        fontSize={fontSize}
-        fontWeight="bold"
-        fill="#34d399"
-        textAnchor="middle"
-      >
-        S
-      </SvgText>
-      <SvgText
-        x={offX + (cols - 1) * cellSize + cellSize / 2}
-        y={offY + (rows - 1) * cellSize + cellSize / 2 + fontSize * 0.36}
-        fontSize={fontSize}
-        fontWeight="bold"
-        fill="#fbbf24"
-        textAnchor="middle"
-      >
-        G
-      </SvgText>
-      <Circle
-        cx={px + cellSize / 2}
-        cy={py + cellSize / 2}
-        r={radius}
-        fill="#818cf8"
-        opacity={0.9}
-      />
-      <Circle
-        cx={px + cellSize / 2 - radius * 0.2}
-        cy={py + cellSize / 2 - radius * 0.25}
-        r={radius * 0.4}
-        fill="rgba(255,255,255,0.5)"
-      />
+      <SvgText x={offX + cellSize / 2} y={offY + cellSize / 2 + fontSize * 0.36} fontSize={fontSize} fontWeight="bold" fill="#34d399" textAnchor="middle">S</SvgText>
+      <SvgText x={offX + (cols - 1) * cellSize + cellSize / 2} y={offY + (rows - 1) * cellSize + cellSize / 2 + fontSize * 0.36} fontSize={fontSize} fontWeight="bold" fill="#fbbf24" textAnchor="middle">G</SvgText>
+      <Circle cx={px + cellSize / 2} cy={py + cellSize / 2} r={radius} fill="#818cf8" opacity={0.95} />
+      <Circle cx={px + cellSize / 2 - radius * 0.2} cy={py + cellSize / 2 - radius * 0.25} r={radius * 0.4} fill="rgba(255,255,255,0.5)" />
     </Svg>
   );
 }
 
 // ─── D-Pad ────────────────────────────────────────────────────────────────────
 
-interface DPadProps {
-  onMove: (dr: number, dc: number) => void;
-}
-
-function DPad({ onMove }: DPadProps) {
+function DPad({ onMove }: { onMove: (dr: number, dc: number) => void }) {
   const BTN = 64;
   const GAP = 6;
 
   const btn = (dr: number, dc: number, label: string) => (
     <TouchableOpacity
-      style={styles.dpadBtn}
-      activeOpacity={0.6}
+      style={[styles.dpadBtn, { width: BTN, height: BTN }]}
+      activeOpacity={0.55}
       onPress={() => onMove(dr, dc)}
     >
       <Text style={styles.dpadArrow}>{label}</Text>
@@ -448,21 +374,21 @@ function DPad({ onMove }: DPadProps) {
   );
 
   return (
-    <View style={styles.dpadContainer}>
-      <View style={styles.dpadRow}>
-        <View style={{ width: BTN + GAP * 2 }} />
+    <View style={[styles.dpadContainer, { gap: GAP }]}>
+      <View style={[styles.dpadRow, { gap: GAP }]}>
+        <View style={{ width: BTN }} />
         {btn(-1, 0, "▲")}
-        <View style={{ width: BTN + GAP * 2 }} />
+        <View style={{ width: BTN }} />
       </View>
-      <View style={styles.dpadRow}>
+      <View style={[styles.dpadRow, { gap: GAP }]}>
         {btn(0, -1, "◀")}
-        <View style={styles.dpadCenter} />
+        <View style={[styles.dpadCenter, { width: BTN, height: BTN }]} />
         {btn(0, 1, "▶")}
       </View>
-      <View style={styles.dpadRow}>
-        <View style={{ width: BTN + GAP * 2 }} />
+      <View style={[styles.dpadRow, { gap: GAP }]}>
+        <View style={{ width: BTN }} />
         {btn(1, 0, "▼")}
-        <View style={{ width: BTN + GAP * 2 }} />
+        <View style={{ width: BTN }} />
       </View>
     </View>
   );
@@ -473,6 +399,8 @@ function DPad({ onMove }: DPadProps) {
 export default function MazeScreen() {
   const [sizeIndex, setSizeIndex] = useState(1);
   const [showHint, setShowHint] = useState(false);
+  const [bestScores, setBestScores] = useState<Record<string, BestScore>>({});
+  const [newRecord, setNewRecord] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const screenWidth = Dimensions.get("window").width;
@@ -489,41 +417,103 @@ export default function MazeScreen() {
     rows: 15,
   });
 
+  useEffect(() => {
+    loadBestScores().then(setBestScores);
+  }, []);
+
   const startGame = useCallback((idx: number) => {
     const { rows, cols } = MAZE_SIZES[idx];
     const maze = generateMaze(rows, cols);
     dispatch({ type: "INIT_MAZE", maze, rows, cols });
     setShowHint(false);
+    setNewRecord(false);
+    haptic("medium");
   }, []);
 
-  const move = useCallback((dr: number, dc: number) => {
-    dispatch({ type: "MOVE", dr, dc });
-  }, []);
+  const move = useCallback(
+    (dr: number, dc: number) => {
+      if (state.status !== "playing") return;
+      const { playerRow: r, playerCol: c, maze } = state;
+      const cell = maze[r][c];
+      let blocked = false;
+      if (dr === -1 && cell.walls.top) blocked = true;
+      if (dr === 1 && cell.walls.bottom) blocked = true;
+      if (dc === 1 && cell.walls.right) blocked = true;
+      if (dc === -1 && cell.walls.left) blocked = true;
+      if (blocked) {
+        haptic("error");
+      } else {
+        haptic("light");
+      }
+      dispatch({ type: "MOVE", dr, dc });
+    },
+    [state]
+  );
 
   useEffect(() => {
     if (state.status === "playing") {
-      timerRef.current = setInterval(
-        () => dispatch({ type: "TICK" }),
-        1000
-      );
+      timerRef.current = setInterval(() => dispatch({ type: "TICK" }), 1000);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
     }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state.status]);
+
+  useEffect(() => {
+    if (state.status === "won") {
+      haptic("success");
+      const key = `${state.rows}x${state.cols}`;
+      saveBestScore(key, state.timeSeconds, state.moves, bestScores).then(
+        ({ updated, isNew }) => {
+          setBestScores(updated);
+          setNewRecord(isNew);
+        }
+      );
+    }
+  }, [state.status]);
+
+  // ─ Swipe gesture handler ──────────────────────────────────────────────────
+
+  const swipeRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const SWIPE_THRESHOLD = 20;
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
+      onPanResponderGrant: () => {
+        swipeRef.current = { dx: 0, dy: 0 };
+      },
+      onPanResponderMove: (_, g) => {
+        swipeRef.current = { dx: g.dx, dy: g.dy };
+      },
+      onPanResponderRelease: (_, g) => {
+        const { dx, dy } = g;
+        if (Math.abs(dx) < SWIPE_THRESHOLD && Math.abs(dy) < SWIPE_THRESHOLD)
+          return;
+        if (Math.abs(dx) > Math.abs(dy)) {
+          if (dx > 0) dispatch({ type: "MOVE", dr: 0, dc: 1 });
+          else dispatch({ type: "MOVE", dr: 0, dc: -1 });
+        } else {
+          if (dy > 0) dispatch({ type: "MOVE", dr: 1, dc: 0 });
+          else dispatch({ type: "MOVE", dr: -1, dc: 0 });
+        }
+        haptic("light");
+      },
+    })
+  ).current;
 
   const hintPath =
     showHint && state.maze.length > 0
-      ? findPath(
-          state.maze,
-          state.rows,
-          state.cols,
-          state.playerRow,
-          state.playerCol
-        )
+      ? findPath(state.maze, state.rows, state.cols, state.playerRow, state.playerCol)
       : new Set<string>();
+
+  const currentKey = `${state.rows}x${state.cols}`;
+  const best = bestScores[currentKey];
+  const idleKey = `${MAZE_SIZES[sizeIndex].rows}x${MAZE_SIZES[sizeIndex].cols}`;
+  const idleBest = bestScores[idleKey];
+  const hasAnyBest = Object.keys(bestScores).length > 0;
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
@@ -543,55 +533,57 @@ export default function MazeScreen() {
           <View style={styles.statsBar}>
             <View style={styles.statChip}>
               <Text style={styles.statLabel}>Time</Text>
-              <Text style={styles.statValue}>
-                {formatTime(state.timeSeconds)}
-              </Text>
+              <Text style={styles.statValue}>{formatTime(state.timeSeconds)}</Text>
+              {best && <Text style={styles.statBest}>best {formatTime(best.time)}</Text>}
             </View>
             <View style={styles.statChip}>
               <Text style={styles.statLabel}>Moves</Text>
               <Text style={styles.statValue}>{state.moves}</Text>
+              {best && <Text style={styles.statBest}>best {best.moves}</Text>}
             </View>
           </View>
         )}
 
         {state.status === "idle" && (
           <View style={styles.sizeSelector}>
-            {MAZE_SIZES.map((s, i) => (
-              <TouchableOpacity
-                key={i}
-                style={[
-                  styles.sizeBtn,
-                  sizeIndex === i && styles.sizeBtnActive,
-                ]}
-                onPress={() => setSizeIndex(i)}
-                activeOpacity={0.7}
-              >
-                <Text
+            {MAZE_SIZES.map((s, i) => {
+              const bk = `${s.rows}x${s.cols}`;
+              const b = bestScores[bk];
+              const isGod = i === 5;
+              return (
+                <TouchableOpacity
+                  key={i}
                   style={[
+                    styles.sizeBtn,
+                    sizeIndex === i && (isGod ? styles.sizeBtnGodActive : styles.sizeBtnActive),
+                    isGod && styles.sizeBtnGod,
+                  ]}
+                  onPress={() => setSizeIndex(i)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
                     styles.sizeBtnText,
-                    sizeIndex === i && styles.sizeBtnTextActive,
-                  ]}
-                >
-                  {s.label}
-                </Text>
-                <Text
-                  style={[
-                    styles.sizeBtnSub,
-                    sizeIndex === i && styles.sizeBtnSubActive,
-                  ]}
-                >
-                  {s.sub}
-                </Text>
-              </TouchableOpacity>
-            ))}
+                    sizeIndex === i && (isGod ? styles.sizeBtnGodText : styles.sizeBtnTextActive),
+                  ]}>
+                    {s.label}
+                  </Text>
+                  <Text style={[styles.sizeBtnSub, sizeIndex === i && styles.sizeBtnSubActive]}>
+                    {s.sub}
+                  </Text>
+                  {b && (
+                    <Text style={styles.sizeBtnBest}>
+                      {formatTime(b.time)} / {b.moves}m
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
           </View>
         )}
 
         <View
-          style={[
-            styles.mazeContainer,
-            { width: mazeSize, height: mazeSize },
-          ]}
+          style={[styles.mazeContainer, { width: mazeSize, height: mazeSize }]}
+          {...(state.status === "playing" ? panResponder.panHandlers : {})}
         >
           {state.maze.length > 0 && (
             <MazeSvg
@@ -609,8 +601,13 @@ export default function MazeScreen() {
             <View style={styles.overlay}>
               <Text style={styles.overlayTitle}>Ready to play?</Text>
               <Text style={styles.overlaySubtitle}>
-                Choose a difficulty above
+                {MAZE_SIZES[sizeIndex].label} — {MAZE_SIZES[sizeIndex].sub}
               </Text>
+              {idleBest && (
+                <Text style={styles.overlayBest}>
+                  Best: {formatTime(idleBest.time)} in {idleBest.moves} moves
+                </Text>
+              )}
               <TouchableOpacity
                 style={styles.startBtn}
                 onPress={() => startGame(sizeIndex)}
@@ -623,46 +620,60 @@ export default function MazeScreen() {
 
           {state.status === "won" && (
             <View style={styles.overlay}>
-              <Text style={styles.winEmoji}>🎉</Text>
-              <Text style={styles.winTitle}>Level Complete!</Text>
+              <Text style={styles.winEmoji}>{newRecord ? "🏆" : "🎉"}</Text>
+              <Text style={styles.winTitle}>
+                {newRecord ? "New Record!" : "Level Complete!"}
+              </Text>
               <View style={styles.winStats}>
                 <View style={styles.winStatItem}>
                   <Text style={styles.winStatLabel}>Time</Text>
-                  <Text style={styles.winStatValue}>
-                    {formatTime(state.timeSeconds)}
-                  </Text>
+                  <Text style={styles.winStatValue}>{formatTime(state.timeSeconds)}</Text>
+                  {best && !newRecord && (
+                    <Text style={styles.winStatBest}>best {formatTime(best.time)}</Text>
+                  )}
                 </View>
                 <View style={styles.winStatItem}>
                   <Text style={styles.winStatLabel}>Moves</Text>
                   <Text style={styles.winStatValue}>{state.moves}</Text>
+                  {best && !newRecord && (
+                    <Text style={styles.winStatBest}>best {best.moves}</Text>
+                  )}
                 </View>
               </View>
-              <TouchableOpacity
-                style={styles.startBtn}
-                onPress={() => startGame(sizeIndex)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.startBtnText}>Play Again</Text>
-              </TouchableOpacity>
+              {newRecord && (
+                <Text style={styles.recordLabel}>Personal best saved!</Text>
+              )}
+              <View style={styles.winBtnRow}>
+                <TouchableOpacity
+                  style={styles.startBtn}
+                  onPress={() => startGame(sizeIndex)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.startBtnText}>Play Again</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.secondaryBtn}
+                  onPress={() => dispatch({ type: "RESET" })}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.secondaryBtnText}>Change Level</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         </View>
 
         {state.status === "playing" && (
           <View style={styles.controls}>
+            <Text style={styles.swipeHint}>Swipe on the maze or use the D-pad below</Text>
             <View style={styles.hintRow}>
               <TouchableOpacity
                 style={[styles.hintBtn, showHint && styles.hintBtnActive]}
-                onPress={() => setShowHint((v) => !v)}
+                onPress={() => { setShowHint((v) => !v); haptic("light"); }}
                 activeOpacity={0.7}
               >
-                <Text
-                  style={[
-                    styles.hintBtnText,
-                    showHint && styles.hintBtnTextActive,
-                  ]}
-                >
-                  {showHint ? "Hide Hint" : "Show Hint"}
+                <Text style={[styles.hintBtnText, showHint && styles.hintBtnTextActive]}>
+                  {showHint ? "Hide Hint" : "💡 Hint"}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -670,10 +681,48 @@ export default function MazeScreen() {
                 onPress={() => startGame(sizeIndex)}
                 activeOpacity={0.7}
               >
-                <Text style={styles.resetBtnText}>Restart</Text>
+                <Text style={styles.resetBtnText}>New Maze</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.resetBtn}
+                onPress={() => dispatch({ type: "RESET" })}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.resetBtnText}>Change Level</Text>
               </TouchableOpacity>
             </View>
             <DPad onMove={move} />
+          </View>
+        )}
+
+        {hasAnyBest && state.status === "idle" && (
+          <View style={styles.bestTable}>
+            <Text style={styles.bestTableTitle}>Your Best Scores</Text>
+            <View style={styles.bestTableContainer}>
+              <View style={styles.bestTableHeader}>
+                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { flex: 1.5 }]}>Level</Text>
+                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { textAlign: "right" }]}>Best Time</Text>
+                <Text style={[styles.bestTableCell, styles.bestTableHeaderText, { textAlign: "right" }]}>Best Moves</Text>
+              </View>
+              {MAZE_SIZES.map((s, i) => {
+                const b = bestScores[`${s.rows}x${s.cols}`];
+                if (!b) return null;
+                return (
+                  <View key={i} style={styles.bestTableRow}>
+                    <View style={{ flex: 1.5 }}>
+                      <Text style={styles.bestTableLevel}>{s.label}</Text>
+                      <Text style={styles.bestTableSub}>{s.sub}</Text>
+                    </View>
+                    <Text style={[styles.bestTableCell, styles.bestTimeText, { textAlign: "right" }]}>
+                      {formatTime(b.time)}
+                    </Text>
+                    <Text style={[styles.bestTableCell, styles.bestMovesText, { textAlign: "right" }]}>
+                      {b.moves}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
           </View>
         )}
       </ScrollView>
@@ -684,221 +733,67 @@ export default function MazeScreen() {
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: "#0f1117",
-  },
-  scroll: {
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingBottom: 32,
-    paddingTop: 12,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: "#818cf8",
-    marginBottom: 4,
-    letterSpacing: -0.5,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: "#64748b",
-    marginBottom: 12,
-  },
-  statsBar: {
-    flexDirection: "row",
-    gap: 16,
-    marginBottom: 12,
-  },
-  statChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  statLabel: {
-    color: "#64748b",
-    fontSize: 13,
-  },
-  statValue: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "bold",
-    fontVariant: ["tabular-nums"],
-  },
-  sizeSelector: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    justifyContent: "center",
-    marginBottom: 14,
-  },
-  sizeBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    alignItems: "center",
-    minWidth: 72,
-  },
-  sizeBtnActive: {
-    backgroundColor: "#4f46e5",
-    borderColor: "#818cf8",
-  },
-  sizeBtnText: {
-    color: "#94a3b8",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  sizeBtnTextActive: {
-    color: "#fff",
-  },
-  sizeBtnSub: {
-    color: "#475569",
-    fontSize: 11,
-    marginTop: 1,
-  },
-  sizeBtnSubActive: {
-    color: "rgba(255,255,255,0.7)",
-  },
-  mazeContainer: {
-    borderRadius: 12,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    position: "relative",
-  },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(15,17,23,0.92)",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
-    borderRadius: 12,
-  },
-  overlayTitle: {
-    color: "#a5b4fc",
-    fontSize: 22,
-    fontWeight: "bold",
-  },
-  overlaySubtitle: {
-    color: "#64748b",
-    fontSize: 14,
-  },
-  startBtn: {
-    backgroundColor: "#4f46e5",
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 14,
-    marginTop: 4,
-  },
-  startBtnText: {
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "bold",
-  },
-  winEmoji: {
-    fontSize: 48,
-  },
-  winTitle: {
-    color: "#fbbf24",
-    fontSize: 26,
-    fontWeight: "bold",
-  },
-  winStats: {
-    flexDirection: "row",
-    gap: 32,
-  },
-  winStatItem: {
-    alignItems: "center",
-  },
-  winStatLabel: {
-    color: "#64748b",
-    fontSize: 13,
-  },
-  winStatValue: {
-    color: "#fff",
-    fontSize: 22,
-    fontWeight: "bold",
-  },
-  controls: {
-    alignItems: "center",
-    marginTop: 16,
-    gap: 12,
-    width: "100%",
-  },
-  hintRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  hintBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(255,255,255,0.05)",
-  },
-  hintBtnActive: {
-    backgroundColor: "rgba(6,182,212,0.15)",
-    borderColor: "rgba(6,182,212,0.5)",
-  },
-  hintBtnText: {
-    color: "#94a3b8",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  hintBtnTextActive: {
-    color: "#22d3ee",
-  },
-  resetBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(255,255,255,0.05)",
-  },
-  resetBtnText: {
-    color: "#94a3b8",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  dpadContainer: {
-    alignItems: "center",
-    gap: 6,
-  },
-  dpadRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  dpadBtn: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    backgroundColor: "#1a1f33",
-    borderWidth: 1,
-    borderColor: "#252b45",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  dpadArrow: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 22,
-  },
-  dpadCenter: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,0.03)",
-    borderWidth: 1,
-    borderColor: "#1e2438",
-  },
+  root: { flex: 1, backgroundColor: "#0f1117" },
+  scroll: { alignItems: "center", paddingHorizontal: 16, paddingBottom: 40, paddingTop: 12 },
+  title: { fontSize: 28, fontWeight: "bold", color: "#818cf8", marginBottom: 4, letterSpacing: -0.5 },
+  subtitle: { fontSize: 14, color: "#64748b", marginBottom: 12 },
+  statsBar: { flexDirection: "row", gap: 12, marginBottom: 12, flexWrap: "wrap", justifyContent: "center" },
+  statChip: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(255,255,255,0.06)", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
+  statLabel: { color: "#64748b", fontSize: 13 },
+  statValue: { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  statBest: { color: "#475569", fontSize: 11, marginLeft: 4 },
+  sizeSelector: { flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "center", marginBottom: 14 },
+  sizeBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.04)", alignItems: "center", minWidth: 70 },
+  sizeBtnActive: { backgroundColor: "#4f46e5", borderColor: "#818cf8" },
+  sizeBtnGod: { borderColor: "rgba(234,179,8,0.4)", backgroundColor: "rgba(234,179,8,0.05)" },
+  sizeBtnGodActive: { backgroundColor: "#ca8a04", borderColor: "#fbbf24" },
+  sizeBtnText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
+  sizeBtnTextActive: { color: "#fff" },
+  sizeBtnGodText: { color: "#fbbf24" },
+  sizeBtnSub: { color: "#475569", fontSize: 11, marginTop: 1 },
+  sizeBtnSubActive: { color: "rgba(255,255,255,0.7)" },
+  sizeBtnBest: { color: "#374151", fontSize: 9, marginTop: 2 },
+  mazeContainer: { borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", position: "relative" },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,17,23,0.93)", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 12 },
+  overlayTitle: { color: "#a5b4fc", fontSize: 22, fontWeight: "bold" },
+  overlaySubtitle: { color: "#94a3b8", fontSize: 14 },
+  overlayBest: { color: "#475569", fontSize: 12, marginTop: -4 },
+  startBtn: { backgroundColor: "#4f46e5", paddingHorizontal: 28, paddingVertical: 13, borderRadius: 13, marginTop: 4 },
+  startBtnText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  secondaryBtn: { backgroundColor: "rgba(255,255,255,0.08)", paddingHorizontal: 20, paddingVertical: 13, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)" },
+  secondaryBtnText: { color: "#94a3b8", fontSize: 15, fontWeight: "600" },
+  winEmoji: { fontSize: 44 },
+  winTitle: { color: "#fbbf24", fontSize: 24, fontWeight: "bold" },
+  winStats: { flexDirection: "row", gap: 32 },
+  winStatItem: { alignItems: "center" },
+  winStatLabel: { color: "#64748b", fontSize: 13 },
+  winStatValue: { color: "#fff", fontSize: 22, fontWeight: "bold" },
+  winStatBest: { color: "#374151", fontSize: 11, marginTop: 1 },
+  recordLabel: { color: "rgba(234,179,8,0.6)", fontSize: 12 },
+  winBtnRow: { flexDirection: "row", gap: 10, marginTop: 4 },
+  controls: { alignItems: "center", marginTop: 14, gap: 10, width: "100%" },
+  swipeHint: { color: "#374151", fontSize: 12, textAlign: "center" },
+  hintRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", justifyContent: "center" },
+  hintBtn: { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" },
+  hintBtnActive: { backgroundColor: "rgba(6,182,212,0.15)", borderColor: "rgba(6,182,212,0.5)" },
+  hintBtnText: { color: "#94a3b8", fontSize: 14, fontWeight: "600" },
+  hintBtnTextActive: { color: "#22d3ee" },
+  resetBtn: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.05)" },
+  resetBtnText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
+  dpadContainer: { alignItems: "center" },
+  dpadRow: { flexDirection: "row", alignItems: "center" },
+  dpadBtn: { borderRadius: 16, backgroundColor: "#1a1f33", borderWidth: 1, borderColor: "#252b45", alignItems: "center", justifyContent: "center" },
+  dpadArrow: { color: "rgba(255,255,255,0.8)", fontSize: 20 },
+  dpadCenter: { borderRadius: 16, backgroundColor: "rgba(255,255,255,0.03)", borderWidth: 1, borderColor: "#1e2438" },
+  bestTable: { marginTop: 20, width: "100%", maxWidth: 380 },
+  bestTableTitle: { color: "#475569", fontSize: 11, fontWeight: "600", textAlign: "center", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 },
+  bestTableContainer: { borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", overflow: "hidden" },
+  bestTableHeader: { flexDirection: "row", backgroundColor: "rgba(255,255,255,0.04)", paddingVertical: 8, paddingHorizontal: 12 },
+  bestTableHeaderText: { color: "#475569", fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 },
+  bestTableRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.05)" },
+  bestTableCell: { flex: 1, fontSize: 14 },
+  bestTableLevel: { color: "#cbd5e1", fontSize: 14, fontWeight: "600" },
+  bestTableSub: { color: "#475569", fontSize: 11 },
+  bestTimeText: { color: "#818cf8", fontWeight: "600" },
+  bestMovesText: { color: "#22d3ee", fontWeight: "600" },
 });

@@ -44,6 +44,11 @@ type Action =
   | { type: "TICK" }
   | { type: "RESET" };
 
+interface BestScore {
+  time: number;
+  moves: number;
+}
+
 // ─── Maze Generation ─────────────────────────────────────────────────────────
 
 function createGrid(rows: number, cols: number): Cell[][] {
@@ -76,7 +81,6 @@ function generateMaze(rows: number, cols: number): Cell[][] {
     return a;
   }
 
-  // Iterative DFS using an explicit stack to avoid call-stack overflow on large grids
   const stack: [number, number][] = [];
   grid[0][0].visited = true;
   stack.push([0, 0]);
@@ -114,7 +118,6 @@ function findPath(
   startRow: number,
   startCol: number
 ): Set<string> {
-  // BFS from (startRow, startCol) to (rows-1, cols-1)
   const endRow = rows - 1;
   const endCol = cols - 1;
   const queue: [number, number, [number, number][]][] = [
@@ -126,7 +129,6 @@ function findPath(
   while (queue.length > 0) {
     const [r, c, path] = queue.shift()!;
     if (r === endRow && c === endCol) {
-      // Return set of "row,col" strings for fast lookup
       return new Set(path.map(([pr, pc]) => `${pr},${pc}`));
     }
     const cell = maze[r][c];
@@ -199,20 +201,60 @@ function reducer(state: GameState, action: Action): GameState {
       if (state.status !== "playing") return state;
       return { ...state, timeSeconds: state.timeSeconds + 1 };
 
+    case "RESET":
+      return {
+        ...state,
+        maze: [],
+        playerRow: 0,
+        playerCol: 0,
+        moves: 0,
+        timeSeconds: 0,
+        status: "idle",
+      };
+
     default:
       return state;
   }
 }
 
+// ─── Best Score Persistence ───────────────────────────────────────────────────
+
+const LS_KEY = "maze-best-scores";
+
+function loadBestScores(): Record<string, BestScore> {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveBestScore(key: string, time: number, moves: number) {
+  const all = loadBestScores();
+  const prev = all[key];
+  const isBetter =
+    !prev ||
+    time < prev.time ||
+    (time === prev.time && moves < prev.moves);
+  if (isBetter) {
+    all[key] = { time, moves };
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(all));
+    } catch {}
+  }
+  return isBetter;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MAZE_SIZES = [
-  { label: "Easy (10×10)", rows: 10, cols: 10 },
-  { label: "Medium (15×15)", rows: 15, cols: 15 },
-  { label: "Hard (20×20)", rows: 20, cols: 20 },
-  { label: "Harder (30×30)", rows: 30, cols: 30 },
-  { label: "Hardest (40×40)", rows: 40, cols: 40 },
-  { label: "GOD (50×50)", rows: 50, cols: 50 },
+  { label: "Easy", sub: "10×10", rows: 10, cols: 10 },
+  { label: "Medium", sub: "15×15", rows: 15, cols: 15 },
+  { label: "Hard", sub: "20×20", rows: 20, cols: 20 },
+  { label: "Harder", sub: "30×30", rows: 30, cols: 30 },
+  { label: "Hardest", sub: "40×40", rows: 40, cols: 40 },
+  { label: "GOD", sub: "50×50", rows: 50, cols: 50 },
 ];
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -222,6 +264,8 @@ export default function MazeGame() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sizeIndex, setSizeIndex] = useReducer((_: number, v: number) => v, 1);
   const [showHint, setShowHint] = useState(false);
+  const [bestScores, setBestScores] = useState<Record<string, BestScore>>(() => loadBestScores());
+  const [newRecord, setNewRecord] = useState(false);
   const isTouchDevice = useIsTouchDevice();
 
   const [state, dispatch] = useReducer(reducer, {
@@ -243,9 +287,21 @@ export default function MazeGame() {
       const maze = generateMaze(rows, cols);
       dispatch({ type: "INIT_MAZE", maze, rows, cols });
       setShowHint(false);
+      setNewRecord(false);
     },
     []
   );
+
+  // ── Save score on win ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (state.status === "won") {
+      const key = `${state.rows}x${state.cols}`;
+      const isNew = saveBestScore(key, state.timeSeconds, state.moves);
+      setBestScores(loadBestScores());
+      setNewRecord(isNew);
+    }
+  }, [state.status, state.rows, state.cols, state.timeSeconds, state.moves]);
 
   // ── Timer ──────────────────────────────────────────────────────────────────
 
@@ -298,7 +354,6 @@ export default function MazeGame() {
 
     const { rows, cols, maze, playerRow, playerCol } = state;
 
-    // Compute cell size to fit the canvas container
     const maxW = canvas.width;
     const maxH = canvas.height;
     const cellSize = Math.floor(Math.min(maxW / cols, maxH / rows));
@@ -307,16 +362,13 @@ export default function MazeGame() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Background
     ctx.fillStyle = "#0f1117";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Compute hint path from current player position when hint is on
     const hintPath = showHint
       ? findPath(maze, rows, cols, playerRow, playerCol)
       : new Set<string>();
 
-    // Draw cell interiors
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const x = offsetX + c * cellSize;
@@ -325,14 +377,12 @@ export default function MazeGame() {
         const onPath = hintPath.has(key);
 
         if (onPath) {
-          // Hint path — soft cyan/teal highlight
           ctx.fillStyle = "rgba(6, 182, 212, 0.22)";
         } else {
           ctx.fillStyle = "#1e2030";
         }
         ctx.fillRect(x + 1, y + 1, cellSize - 1, cellSize - 1);
 
-        // Draw a small dot on the path cells (skip player + start + goal)
         if (
           onPath &&
           !(r === playerRow && c === playerCol) &&
@@ -409,10 +459,8 @@ export default function MazeGame() {
     // Draw player
     const px = offsetX + playerCol * cellSize;
     const py = offsetY + playerRow * cellSize;
-    const pad = Math.max(3, Math.floor(cellSize * 0.18));
     const radius = Math.max(3, Math.floor(cellSize * 0.28));
 
-    // Glow
     ctx.shadowColor = "#818cf8";
     ctx.shadowBlur = 10;
     ctx.fillStyle = "#818cf8";
@@ -421,7 +469,6 @@ export default function MazeGame() {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Player highlight
     ctx.fillStyle = "rgba(255,255,255,0.4)";
     ctx.beginPath();
     ctx.arc(
@@ -432,8 +479,6 @@ export default function MazeGame() {
       Math.PI * 2
     );
     ctx.fill();
-
-    void pad;
   }, [state, showHint]);
 
   // ── Format time ────────────────────────────────────────────────────────────
@@ -444,9 +489,11 @@ export default function MazeGame() {
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
-  // ── Canvas size ────────────────────────────────────────────────────────────
-
   const CANVAS_SIZE = 520;
+  const currentSizeKey = `${state.rows}x${state.cols}`;
+  const best = bestScores[currentSizeKey];
+  const idleSizeKey = `${MAZE_SIZES[sizeIndex].rows}x${MAZE_SIZES[sizeIndex].cols}`;
+  const idleBest = bestScores[idleSizeKey];
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -466,38 +513,54 @@ export default function MazeGame() {
 
       {/* Stats bar */}
       {state.status !== "idle" && (
-        <div className="flex gap-6 mb-4 text-sm font-mono">
+        <div className="flex gap-4 mb-4 text-sm font-mono flex-wrap justify-center">
           <div className="flex items-center gap-2 bg-white/5 rounded-lg px-4 py-2">
             <span className="text-gray-400">Time</span>
             <span className="text-white font-bold text-base">{formatTime(state.timeSeconds)}</span>
+            {best && (
+              <span className="text-gray-600 text-xs">best {formatTime(best.time)}</span>
+            )}
           </div>
           <div className="flex items-center gap-2 bg-white/5 rounded-lg px-4 py-2">
             <span className="text-gray-400">Moves</span>
             <span className="text-white font-bold text-base">{state.moves}</span>
+            {best && (
+              <span className="text-gray-600 text-xs">best {best.moves}</span>
+            )}
           </div>
         </div>
       )}
 
-      {/* Size selector */}
+      {/* Size selector — idle only */}
       {state.status === "idle" && (
         <div className="flex flex-wrap gap-2 justify-center mb-6 max-w-lg">
-          {MAZE_SIZES.map((s, i) => (
-            <button
-              key={i}
-              onClick={() => setSizeIndex(i)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ${
-                i === 5
-                  ? sizeIndex === i
-                    ? "bg-yellow-500 border-yellow-400 text-black font-bold"
-                    : "bg-yellow-900/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-900/40"
-                  : sizeIndex === i
-                    ? "bg-indigo-500 border-indigo-400 text-white"
-                    : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
+          {MAZE_SIZES.map((s, i) => {
+            const bk = `${s.rows}x${s.cols}`;
+            const b = bestScores[bk];
+            return (
+              <button
+                key={i}
+                onClick={() => setSizeIndex(i)}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border transition-all flex flex-col items-center min-w-[72px] ${
+                  i === 5
+                    ? sizeIndex === i
+                      ? "bg-yellow-500 border-yellow-400 text-black font-bold"
+                      : "bg-yellow-900/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-900/40"
+                    : sizeIndex === i
+                      ? "bg-indigo-500 border-indigo-400 text-white"
+                      : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
+                }`}
+              >
+                <span>{s.label}</span>
+                <span className="text-[10px] opacity-60">{s.sub}</span>
+                {b && (
+                  <span className="text-[9px] opacity-50 mt-0.5">
+                    {formatTime(b.time)} / {b.moves}m
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -515,29 +578,17 @@ export default function MazeGame() {
 
         {/* Idle overlay */}
         {state.status === "idle" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0f1117]/90 gap-6">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0f1117]/90 gap-5">
             <div className="text-center">
               <p className="text-2xl font-bold text-indigo-300 mb-1">Ready to play?</p>
-              <p className="text-sm text-gray-400">Choose a difficulty and start!</p>
-            </div>
-            <div className="flex flex-wrap gap-2 justify-center px-4 max-w-xs">
-              {MAZE_SIZES.map((s, i) => (
-                <button
-                  key={i}
-                  onClick={() => setSizeIndex(i)}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ${
-                    i === 5
-                      ? sizeIndex === i
-                        ? "bg-yellow-500 border-yellow-400 text-black font-bold"
-                        : "bg-yellow-900/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-900/40"
-                      : sizeIndex === i
-                        ? "bg-indigo-500 border-indigo-400 text-white"
-                        : "bg-white/5 border-white/10 text-gray-300 hover:bg-white/10"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
+              <p className="text-sm text-gray-400">
+                {MAZE_SIZES[sizeIndex].label} — {MAZE_SIZES[sizeIndex].sub}
+              </p>
+              {idleBest && (
+                <p className="text-xs text-gray-600 mt-1">
+                  Best: {formatTime(idleBest.time)} in {idleBest.moves} moves
+                </p>
+              )}
             </div>
             <button
               onClick={() => startGame(sizeIndex)}
@@ -551,24 +602,43 @@ export default function MazeGame() {
         {/* Win overlay */}
         {state.status === "won" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0f1117]/90 gap-4">
-            <div className="text-5xl mb-1">🎉</div>
-            <p className="text-3xl font-bold text-yellow-400">Level Complete!</p>
+            <div className="text-5xl mb-1">{newRecord ? "🏆" : "🎉"}</div>
+            <p className="text-3xl font-bold text-yellow-400">
+              {newRecord ? "New Record!" : "Level Complete!"}
+            </p>
             <div className="flex gap-6 text-sm font-mono mt-1">
               <div className="text-center">
                 <p className="text-gray-400">Time</p>
                 <p className="text-white font-bold text-xl">{formatTime(state.timeSeconds)}</p>
+                {best && !newRecord && (
+                  <p className="text-gray-600 text-xs">best {formatTime(best.time)}</p>
+                )}
               </div>
               <div className="text-center">
                 <p className="text-gray-400">Moves</p>
                 <p className="text-white font-bold text-xl">{state.moves}</p>
+                {best && !newRecord && (
+                  <p className="text-gray-600 text-xs">best {best.moves}</p>
+                )}
               </div>
             </div>
-            <button
-              onClick={() => startGame(sizeIndex)}
-              className="mt-2 px-8 py-3 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-xl font-bold text-lg transition-all shadow-lg shadow-indigo-900/50"
-            >
-              Play Again
-            </button>
+            {newRecord && (
+              <p className="text-yellow-500/70 text-xs">Personal best saved!</p>
+            )}
+            <div className="flex gap-3 mt-1">
+              <button
+                onClick={() => startGame(sizeIndex)}
+                className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-xl font-bold text-base transition-all shadow-lg shadow-indigo-900/50"
+              >
+                Play Again
+              </button>
+              <button
+                onClick={() => dispatch({ type: "RESET" })}
+                className="px-6 py-2.5 bg-white/10 hover:bg-white/15 text-gray-200 rounded-xl font-bold text-base transition-all"
+              >
+                Change Level
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -579,7 +649,6 @@ export default function MazeGame() {
           {/* D-pad — only shown on touch/mobile devices */}
           {isTouchDevice && (
             <div className="mt-1 mb-1 select-none" style={{ touchAction: "none" }}>
-              {/* 3×3 grid layout: empty / up / empty | left / center / right | empty / down / empty */}
               <div
                 style={{
                   display: "grid",
@@ -588,7 +657,6 @@ export default function MazeGame() {
                   gap: "4px",
                 }}
               >
-                {/* Row 1 */}
                 <div />
                 <button
                   onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: -1, dc: 0 }); }}
@@ -599,7 +667,6 @@ export default function MazeGame() {
                 </button>
                 <div />
 
-                {/* Row 2 */}
                 <button
                   onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 0, dc: -1 }); }}
                   style={{ WebkitTapHighlightColor: "transparent" }}
@@ -607,7 +674,6 @@ export default function MazeGame() {
                 >
                   <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M5 12l8-8v16z"/></svg>
                 </button>
-                {/* Center inert piece */}
                 <div className="rounded-2xl bg-white/5 border border-white/10 shadow-inner" />
                 <button
                   onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 0, dc: 1 }); }}
@@ -617,7 +683,6 @@ export default function MazeGame() {
                   <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white/80"><path d="M19 12l-8 8V4z"/></svg>
                 </button>
 
-                {/* Row 3 */}
                 <div />
                 <button
                   onPointerDown={(e) => { e.preventDefault(); dispatch({ type: "MOVE", dr: 1, dc: 0 }); }}
@@ -669,6 +734,43 @@ export default function MazeGame() {
           <p className="text-xs text-gray-600 hidden sm:block">
             Arrow Keys or WASD to move
           </p>
+        </div>
+      )}
+
+      {/* Best Scores Table */}
+      {Object.keys(bestScores).length > 0 && state.status === "idle" && (
+        <div className="mt-8 w-full max-w-sm">
+          <h2 className="text-sm font-semibold text-gray-500 mb-2 text-center uppercase tracking-widest">
+            Your Best Scores
+          </h2>
+          <div className="rounded-xl border border-white/10 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-white/5 text-gray-500 text-xs uppercase">
+                  <th className="py-2 px-3 text-left font-medium">Level</th>
+                  <th className="py-2 px-3 text-right font-medium">Best Time</th>
+                  <th className="py-2 px-3 text-right font-medium">Best Moves</th>
+                </tr>
+              </thead>
+              <tbody>
+                {MAZE_SIZES.map((s, i) => {
+                  const key = `${s.rows}x${s.cols}`;
+                  const b = bestScores[key];
+                  if (!b) return null;
+                  return (
+                    <tr key={i} className="border-t border-white/5 hover:bg-white/5 transition-colors">
+                      <td className="py-2 px-3 text-gray-300 font-medium">
+                        {s.label}
+                        <span className="text-gray-600 text-xs ml-1">{s.sub}</span>
+                      </td>
+                      <td className="py-2 px-3 text-right text-indigo-300 font-mono">{formatTime(b.time)}</td>
+                      <td className="py-2 px-3 text-right text-cyan-300 font-mono">{b.moves}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
